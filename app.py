@@ -1,20 +1,23 @@
-import io, re, json, math, time, socket, datetime as dt
+import io, re, os, datetime as dt
 from urllib.parse import urlparse
-from flask import Flask, request, jsonify, send_file
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
+
 import requests
-from bs4 import BeautifulSoup
-from flask import Flask
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
-import os
-import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError  # <-- this one matters
+from bs4 import BeautifulSoup
+from pptx import Presentation
 
 app = Flask(__name__)
-CORS(app)  # allow browser calls from your WP domain
+# allow all origins (simplest); later you can restrict to your WP domain
+CORS(app, resources={r"/*": {"origins": "*"}})
 
-# ---------- Helpers ----------
-def fetch(url, timeout=20):
-    return requests.get(url, timeout=timeout, headers={"User-Agent":"Mozilla/5.0"})
+# ---------- helpers ----------
+UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+
+def fetch(url, timeout=12):
+    return requests.get(url, timeout=timeout, headers=UA, allow_redirects=True)
 
 def safe_text(el):
     return (el.get_text(" ", strip=True) if el else "").strip()
@@ -22,55 +25,42 @@ def safe_text(el):
 def domain_from_url(u):
     return urlparse(u).netloc.lower()
 
-# ----- WHOIS / RDAP -----
+# ---------- RDAP ----------
 def get_domain_info(u):
     dom = domain_from_url(u)
-    # Try RDAP first (free, standardized)
     try:
-        # Find RDAP server
         tld = dom.split(".")[-1]
-        # IANA bootstrap
-        rdap_boot = requests.get("https://data.iana.org/rdap/dns.json", timeout=15).json()
-        servers = [s for s in rdap_boot["services"] if any(tld == x for x in s[0])]
+        boot = requests.get("https://data.iana.org/rdap/dns.json", timeout=8).json()
+        servers = [s for s in boot.get("services", []) if any(tld == x for x in s[0])]
         if servers:
             base = servers[0][1][0].rstrip("/")
-            rdap = requests.get(f"{base}/domain/{dom}", timeout=20).json()
+            rdap = requests.get(f"{base}/domain/{dom}", timeout=8).json()
             created = next((e["eventDate"] for e in rdap.get("events", []) if e.get("eventAction")=="registration"), None)
             expires = next((e["eventDate"] for e in rdap.get("events", []) if e.get("eventAction")=="expiration"), None)
-            registrar = (rdap.get("entities",[{}])[0].get("vcardArray",[None,[]])[1][1][3] 
+            registrar = (rdap.get("entities",[{}])[0].get("vcardArray",[None,[]])[1][1][3]
                          if rdap.get("entities") else None)
-            def fmt(d): 
-                return None if not d else d.split("T")[0]
+            def fmt(d): return None if not d else d.split("T")[0]
             expiry_days = None
             if expires:
                 d0 = dt.datetime.utcnow().date()
                 d1 = dt.datetime.fromisoformat(expires.replace("Z","")).date()
                 expiry_days = (d1 - d0).days
-            return {
-                "created": fmt(created),
-                "expiry": fmt(expires),
-                "days_to_expire": expiry_days,
-                "registrar": registrar
-            }
+            return {"created": fmt(created), "expiry": fmt(expires),
+                    "days_to_expire": expiry_days, "registrar": registrar}
     except Exception:
         pass
-    # If RDAP fails, return minimal
     return {"created": None, "expiry": None, "days_to_expire": None, "registrar": None}
 
-
-# ----- Google PSI (no key needed for basic; key recommended for quota) -----
-
-
+# ---------- PSI ----------
 def _parse_psi(j):
     lhr = j.get("lighthouseResult", {}) or {}
     audits = lhr.get("audits", {}) or {}
     cats = lhr.get("categories", {}) or {}
     perf = cats.get("performance", {}).get("score")
-    def val(key):
-        a = audits.get(key, {}) or {}
-        # prefer numericValue; fallback to displayValue string
+    def val(k):
+        a = audits.get(k, {}) or {}
         return a.get("numericValue", a.get("displayValue"))
-    out = {
+    return {
         "performance_score": round((perf or 0)*100) if perf is not None else None,
         "fcp": val("first-contentful-paint"),
         "lcp": val("largest-contentful-paint"),
@@ -78,20 +68,18 @@ def _parse_psi(j):
         "tbt": (audits.get("total-blocking-time", {}) or {}).get("numericValue"),
         "inp": (audits.get("experimental-interaction-to-next-paint", {}) or {}).get("numericValue"),
     }
-    return out
 
 def get_pagespeed(url):
     base = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
-    key = os.getenv("PSI_KEY")  # optional; add in Render env later if needed
+    key = os.getenv("PSI_KEY")
     try:
-        params = {"url": url, "strategy": "mobile"}
+        params = {"url": url, "strategy": "desktop"}
         if key: params["key"] = key
-        r = requests.get(base, params=params, timeout=60)
+        r = requests.get(base, params=params, timeout=30)
         j = r.json()
         if "error" in j or not j.get("lighthouseResult"):
-            # fallback to desktop
-            params["strategy"] = "desktop"
-            r = requests.get(base, params=params, timeout=60)
+            params["strategy"] = "mobile"
+            r = requests.get(base, params=params, timeout=30)
             j = r.json()
         if "error" in j or not j.get("lighthouseResult"):
             return {}
@@ -99,28 +87,38 @@ def get_pagespeed(url):
     except Exception:
         return {}
 
-# ----- On-page checks & links -----
-def analyze_html(url):
-    issues = []
-    links = []
+# ---------- fast link checker ----------
+def _fast_status(u):
     try:
-        res = fetch(url)
-        status = res.status_code
-        if status != 200:
-            issues.append({"severity": "error", "message": f"HTTP status {status} (not 200)."})
+        r = requests.head(u, timeout=3, allow_redirects=True, headers=UA)
+        code = r.status_code
+        if code in (403, 405):
+            r = requests.get(u, timeout=4, allow_redirects=True, stream=False, headers=UA)
+            code = r.status_code
+        return {"href": u, "status": code}
+    except Exception:
+        return {"href": u, "status": 0}
+
+# ---------- analyzer ----------
+def analyze_html(url):
+    issues, links = [], []
+    try:
+        res = fetch(url, timeout=12)
+        if res.status_code != 200:
+            issues.append({"severity": "error", "message": f"HTTP status {res.status_code} (not 200)."})
         if not url.startswith("https://"):
-            issues.append({"severity": "warn", "message": "URL is not HTTPS."})
+            issues.append({"severity":"warn","message":"URL is not HTTPS."})
 
         soup = BeautifulSoup(res.text, "html.parser")
 
-        # ---- <title>
+        # title
         title = safe_text(soup.find("title"))
         if not title:
             issues.append({"severity":"error","message":"Missing <title>."})
         elif len(title) > 60:
             issues.append({"severity":"warn","message":"Title length > 60 characters."})
 
-        # ---- meta description
+        # meta description
         md = soup.find("meta", attrs={"name":"description"})
         desc = (md.get("content","").strip() if md else "")
         if not desc:
@@ -128,44 +126,44 @@ def analyze_html(url):
         elif len(desc) > 160:
             issues.append({"severity":"warn","message":"Meta description > 160 characters."})
 
-        # ---- H1
-        h1s = [safe_text(h) for h in soup.find_all(re.compile("^h1$"))]
+        # H1
+        import re as _re
+        h1s = [safe_text(h) for h in soup.find_all(_re.compile("^h1$"))]
         if len(h1s) == 0:
             issues.append({"severity":"warn","message":"Missing H1."})
         elif len(h1s) > 1:
             issues.append({"severity":"warn","message":f"Multiple H1s ({len(h1s)})."})
 
-        # ---- canonical
+        # canonical
         can = soup.find("link", rel="canonical")
         if not can or not can.get("href"):
             issues.append({"severity":"warn","message":"Missing canonical link."})
         else:
             try:
-                cr = fetch(can.get("href"))
+                cr = fetch(can.get("href"), timeout=6)
                 if cr.status_code != 200:
                     issues.append({"severity":"warn","message":"Canonical URL not returning 200."})
             except Exception:
                 issues.append({"severity":"warn","message":"Canonical URL not reachable."})
 
-        # ---- robots / noindex
+        # robots / noindex
         robots_meta = soup.find("meta", attrs={"name":"robots"})
         if robots_meta and "noindex" in robots_meta.get("content","").lower():
             issues.append({"severity":"error","message":"Page has noindex meta."})
 
-        # ---- images (quick checks)
+        # images (quick)
         big_imgs = 0
         noalt_imgs = 0
         for img in soup.find_all("img"):
             if not img.get("alt","").strip():
                 noalt_imgs += 1
             src = img.get("src")
-            if not src:
-                continue
+            if not src: continue
             try:
                 img_url = src if src.startswith("http") else requests.compat.urljoin(url, src)
-                ih = requests.head(img_url, timeout=3, allow_redirects=True)  # faster
+                ih = requests.head(img_url, timeout=2, allow_redirects=True, headers=UA)
                 size = ih.headers.get("content-length")
-                if size and size.isdigit() and int(size) > 150 * 1024:
+                if size and size.isdigit() and int(size) > 150*1024:
                     big_imgs += 1
             except Exception:
                 pass
@@ -174,20 +172,18 @@ def analyze_html(url):
         if big_imgs > 0:
             issues.append({"severity":"warn","message":f"{big_imgs} large image(s) >150KB."})
 
-        # ---- Links: same-domain only, small sample, parallel & fast
+        # links: same-domain only, tiny sample, parallel
         page_host = urlparse(url).netloc.lower()
         candidates = []
         for a in soup.find_all("a", limit=200):
             href = a.get("href")
-            if not href or href.startswith("#"):
-                continue
+            if not href or href.startswith("#"): continue
             full = href if href.startswith("http") else requests.compat.urljoin(url, href)
             if urlparse(full).netloc.lower() == page_host:
                 candidates.append(full)
-            if len(candidates) >= 12:  # keep it snappy
+            if len(candidates) >= 8:
                 break
 
-        links = []
         if candidates:
             with ThreadPoolExecutor(max_workers=8) as ex:
                 futures = [ex.submit(_fast_status, c) for c in candidates]
@@ -197,18 +193,12 @@ def analyze_html(url):
         return {"issues": issues, "links": links}
     except Exception:
         return {"issues":[{"severity":"error","message":"Fetch failed or invalid HTML."}], "links":[]}
-def _fast_status(u):
-    try:
-        r = requests.head(u, timeout=3, allow_redirects=True)
-        code = r.status_code
-        if code in (403, 405):  # some servers block HEAD
-            r = requests.get(u, timeout=4, allow_redirects=True, stream=False)
-            code = r.status_code
-        return {"href": u, "status": code}
-    except Exception:
-        return {"href": u, "status": 0}
 
-# ---------- Routes ----------
+# ---------- routes ----------
+@app.route("/")
+def health():
+    return jsonify({"ok": True, "service": "seo-url-audit"})
+
 @app.route("/analyze")
 def analyze():
     url = request.args.get("url", "").strip()
@@ -226,109 +216,68 @@ def analyze():
     try:
         with ThreadPoolExecutor(max_workers=3) as ex:
             futs = [ex.submit(_speed), ex.submit(_domain), ex.submit(_seo)]
-            for fut in as_completed(futs, timeout=25):  # time budget
+            for fut in as_completed(futs, timeout=22):  # whole call budget
                 k, v = fut.result()
                 if k == "seo_links":
                     results["seo"] = {"issues": v.get("issues", [])}
                     results["links"] = v.get("links", [])
                 else:
                     results[k] = v
-    except TimeoutError as e:
-        # one of the futures exceeded the 25s window; return whatever we have
-        app.logger.warning(f"/analyze timeout for {url}: {e}")
-    except Exception as e:
-        app.logger.exception(f"/analyze crashed for {url}: {e}")
-        # still return best-effort JSON instead of 500
-        # (optional) include a hint field:
+    except TimeoutError:
+        # return partial results instead of 500
+        pass
+    except Exception:
+        # swallow unexpected exceptions & return partial
         results["error"] = "partial_results_due_to_exception"
 
     return jsonify(results)
-
-
-@app.route("/")
-def home():
-    return jsonify({"ok": True, "service": "seo-url-audit"})
-
-
-# ---------- PPTX ----------
-from pptx import Presentation
-from pptx.util import Inches, Pt
-
-def build_ppt(data, url):
-    prs = Presentation()
-    # Title slide
-    slide = prs.slides.add_slide(prs.slide_layouts[0])
-    slide.shapes.title.text = "SEO URL Audit Report"
-    slide.placeholders[1].text = url
-
-    # Performance slide
-    s2 = prs.slides.add_slide(prs.slide_layouts[1])
-    s2.shapes.title.text = "Core Web Vitals"
-    body = s2.placeholders[1].text_frame
-    sp = data.get("speed", {})
-    items = [
-        ("Performance", sp.get("performance_score")),
-        ("FCP", sp.get("fcp")),
-        ("LCP", sp.get("lcp")),
-        ("CLS", sp.get("cls")),
-        ("INP/TBT", sp.get("inp") or sp.get("tbt")),
-    ]
-    for k,v in items:
-        p = body.add_paragraph(); p.text = f"{k}: {v}"
-
-    # Domain slide
-    s3 = prs.slides.add_slide(prs.slide_layouts[1])
-    s3.shapes.title.text = "Domain Details"
-    b3 = s3.placeholders[1].text_frame
-    dm = data.get("domain", {})
-    for k in ["created","expiry","days_to_expire","registrar"]:
-        p = b3.add_paragraph(); p.text = f"{k}: {dm.get(k)}"
-
-    # Critical issues slide
-    s4 = prs.slides.add_slide(prs.slide_layouts[1])
-    s4.shapes.title.text = "Critical / Important Issues"
-    b4 = s4.placeholders[1].text_frame
-    issues = data.get("seo",{}).get("issues", [])
-    for i in issues[:10]:
-        p = b4.add_paragraph(); p.text = f"{i['severity'].upper()}: {i['message']}"
-
-    # Broken links slide
-    s5 = prs.slides.add_slide(prs.slide_layouts[1])
-    s5.shapes.title.text = "Broken Links (sample)"
-    b5 = s5.placeholders[1].text_frame
-    bad = [l for l in data.get("links",[]) if l.get("status",200) >= 400][:10]
-    if not bad:
-        p = b5.add_paragraph(); p.text = "None found"
-    else:
-        for l in bad:
-            p = b5.add_paragraph(); p.text = f"{l['status']} — {l['href']}"
-
-    return prs
 
 @app.route("/report")
 def report():
     url = request.args.get("url","").strip()
     if not url:
         return "missing url", 400
-    data = {
-        "speed": get_pagespeed(url),
-        "domain": get_domain_info(url),
-        "seo": analyze_html(url)
-    }
-    prs = build_ppt(data, url)
-    buf = io.BytesIO()
-    prs.save(buf); buf.seek(0)
+    data = {"speed": get_pagespeed(url), "domain": get_domain_info(url), "seo": analyze_html(url)}
+    prs = Presentation()
+    s1 = prs.slides.add_slide(prs.slide_layouts[0])
+    s1.shapes.title.text = "SEO URL Audit Report"
+    s1.placeholders[1].text = url
+
+    s2 = prs.slides.add_slide(prs.slide_layouts[1])
+    s2.shapes.title.text = "Core Web Vitals"
+    body = s2.placeholders[1].text_frame
+    sp = data.get("speed",{})
+    for k,v in [("Performance", sp.get("performance_score")), ("FCP", sp.get("fcp")),
+                ("LCP", sp.get("lcp")), ("CLS", sp.get("cls")), ("INP/TBT", sp.get("inp") or sp.get("tbt"))]:
+        p = body.add_paragraph(); p.text = f"{k}: {v}"
+
+    s3 = prs.slides.add_slide(prs.slide_layouts[1])
+    s3.shapes.title.text = "Domain Details"
+    b3 = s3.placeholders[1].text_frame
+    dm = data.get("domain",{})
+    for k in ["created","expiry","days_to_expire","registrar"]:
+        p = b3.add_paragraph(); p.text = f"{k}: {dm.get(k)}"
+
+    s4 = prs.slides.add_slide(prs.slide_layouts[1])
+    s4.shapes.title.text = "Critical / Important Issues"
+    b4 = s4.placeholders[1].text_frame
+    for i in data.get("seo",{}).get("issues",[])[:10]:
+        p = b4.add_paragraph(); p.text = f"{i['severity'].upper()}: {i['message']}"
+
+    s5 = prs.slides.add_slide(prs.slide_layouts[1])
+    s5.shapes.title.text = "Broken Links (sample)"
+    b5 = s5.placeholders[1].text_frame
+    bad = [l for l in data.get("seo",{}).get("links",[]) if l.get("status",200) >= 400][:10]
+    if not bad:
+        p = b5.add_paragraph(); p.text = "None found"
+    else:
+        for l in bad:
+            p = b5.add_paragraph(); p.text = f"{l['status']} — {l['href']}"
+
+    buf = io.BytesIO(); prs.save(buf); buf.seek(0)
     fname = f"SEO_Audit_{domain_from_url(url)}.pptx"
     return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.presentationml.presentation",
                      as_attachment=True, download_name=fname)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-
-
-
-
-
-
-
-
