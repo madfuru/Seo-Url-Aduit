@@ -5,6 +5,7 @@ import requests
 from bs4 import BeautifulSoup
 from flask import Flask
 from flask_cors import CORS
+import os
 
 app = Flask(__name__)
 CORS(app)  # allow browser calls from your WP domain
@@ -55,26 +56,43 @@ def get_domain_info(u):
     return {"created": None, "expiry": None, "days_to_expire": None, "registrar": None}
 
 # ----- Google PSI (no key needed for basic; key recommended for quota) -----
+
+
+def _parse_psi(j):
+    lhr = j.get("lighthouseResult", {}) or {}
+    audits = lhr.get("audits", {}) or {}
+    cats = lhr.get("categories", {}) or {}
+    perf = cats.get("performance", {}).get("score")
+    def val(key):
+        a = audits.get(key, {}) or {}
+        # prefer numericValue; fallback to displayValue string
+        return a.get("numericValue", a.get("displayValue"))
+    out = {
+        "performance_score": round((perf or 0)*100) if perf is not None else None,
+        "fcp": val("first-contentful-paint"),
+        "lcp": val("largest-contentful-paint"),
+        "cls": (audits.get("cumulative-layout-shift", {}) or {}).get("numericValue"),
+        "tbt": (audits.get("total-blocking-time", {}) or {}).get("numericValue"),
+        "inp": (audits.get("experimental-interaction-to-next-paint", {}) or {}).get("numericValue"),
+    }
+    return out
+
 def get_pagespeed(url):
+    base = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
+    key = os.getenv("PSI_KEY")  # optional; add in Render env later if needed
     try:
-        r = requests.get("https://www.googleapis.com/pagespeedonline/v5/runPagespeed",
-                         params={"url": url, "strategy": "mobile"}, timeout=60)
+        params = {"url": url, "strategy": "mobile"}
+        if key: params["key"] = key
+        r = requests.get(base, params=params, timeout=60)
         j = r.json()
-        lhr = j.get("lighthouseResult", {})
-        audits = lhr.get("audits", {})
-        cats = lhr.get("categories", {})
-        perf = cats.get("performance", {}).get("score")
-        def ms(k): 
-            v = audits.get(k, {}).get("displayValue") or audits.get(k, {}).get("numericValue")
-            return v
-        return {
-            "performance_score": round((perf or 0)*100) if perf is not None else None,
-            "fcp": ms("first-contentful-paint"),
-            "lcp": ms("largest-contentful-paint"),
-            "cls": audits.get("cumulative-layout-shift",{}).get("numericValue"),
-            "tbt": audits.get("total-blocking-time",{}).get("numericValue"),
-            "inp": audits.get("experimental-interaction-to-next-paint",{}).get("numericValue")
-        }
+        if "error" in j or not j.get("lighthouseResult"):
+            # fallback to desktop
+            params["strategy"] = "desktop"
+            r = requests.get(base, params=params, timeout=60)
+            j = r.json()
+        if "error" in j or not j.get("lighthouseResult"):
+            return {}
+        return _parse_psi(j)
     except Exception:
         return {}
 
@@ -275,6 +293,7 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
