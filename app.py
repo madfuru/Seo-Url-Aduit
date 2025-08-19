@@ -3,8 +3,11 @@ from urllib.parse import urlparse
 from flask import Flask, request, jsonify, send_file
 import requests
 from bs4 import BeautifulSoup
+from flask import Flask
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app)  # allow browser calls from your WP domain
 
 # ---------- Helpers ----------
 def fetch(url, timeout=20):
@@ -250,3 +253,4 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
