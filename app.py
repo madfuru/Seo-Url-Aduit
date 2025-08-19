@@ -152,17 +152,35 @@ def analyze_html(url):
             issues.append({"severity":"warn","message":f"{big_imgs} large image(s) >150KB."})
 
         # links (sample up to 100)
-        a_tags = soup.find_all("a")[:150]
+                # links (sample fast & safe)
+        page_host = urlparse(url).netloc.lower()
+        a_tags = soup.find_all("a", limit=200)  # collect more, we'll filter
+        sampled = []
         for a in a_tags:
             href = a.get("href")
-            if not href: continue
-            if href.startswith("#"): continue
+            if not href or href.startswith("#"):
+                continue
             full = href if href.startswith("http") else requests.compat.urljoin(url, href)
+            host = urlparse(full).netloc.lower()
+            # only same-domain links to keep checks fast & meaningful
+            if host != page_host:
+                continue
+            sampled.append(full)
+            if len(sampled) >= 40:  # hard cap
+                break
+
+        for full in sampled:
             try:
-                hr = requests.head(full, timeout=10, allow_redirects=True)
-                links.append({"href": full, "status": hr.status_code})
+                hr = requests.head(full, timeout=6, allow_redirects=True)
+                code = hr.status_code
+                # some servers block HEAD; fallback to GET (no content)
+                if code == 405 or code == 403:
+                    gr = requests.get(full, timeout=8, allow_redirects=True, stream=False)
+                    code = gr.status_code
+                links.append({"href": full, "status": code})
             except Exception:
                 links.append({"href": full, "status": 0})
+
 
         return {"issues": issues, "links": links}
     except Exception as e:
@@ -257,5 +275,6 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
