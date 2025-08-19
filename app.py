@@ -26,29 +26,71 @@ def domain_from_url(u):
     return urlparse(u).netloc.lower()
 
 # ---------- RDAP ----------
+def _rdap_events_to_dates(rdap_json):
+    created = expires = None
+    for e in rdap_json.get("events", []) or []:
+        act = (e.get("eventAction") or "").lower()
+        if act in ("registration", "creation"):
+            created = e.get("eventDate")
+        elif act in ("expiration", "expiry", "expire"):
+            expires = e.get("eventDate")
+    def fmt(d): return None if not d else d.split("T")[0]
+    return fmt(created), fmt(expires)
+
 def get_domain_info(u):
     dom = domain_from_url(u)
+
+    # 1) Simple universal fallback first
+    try:
+        j = requests.get(f"https://rdap.org/domain/{dom}", timeout=8).json()
+        created, expires = _rdap_events_to_dates(j)
+        expiry_days = None
+        if expires:
+            d0 = dt.datetime.utcnow().date()
+            d1 = dt.datetime.fromisoformat(expires.replace("Z","")).date()
+            expiry_days = (d1 - d0).days
+        registrar = None
+        # try to pull a human registrar name if present
+        for ent in j.get("entities", []) or []:
+            if ent.get("roles") and "registrar" in [r.lower() for r in ent["roles"]]:
+                va = (ent.get("vcardArray") or [None, []])[1]
+                # find org/name fields in vcard
+                for item in va:
+                    if item and len(item) >= 4 and item[0] in ("fn","org"):
+                        registrar = item[3]
+                        break
+                if registrar: break
+        return {"created": created, "expiry": expires, "days_to_expire": expiry_days, "registrar": registrar}
+    except Exception:
+        pass
+
+    # 2) IANA bootstrap fallback
     try:
         tld = dom.split(".")[-1]
         boot = requests.get("https://data.iana.org/rdap/dns.json", timeout=8).json()
         servers = [s for s in boot.get("services", []) if any(tld == x for x in s[0])]
         if servers:
             base = servers[0][1][0].rstrip("/")
-            rdap = requests.get(f"{base}/domain/{dom}", timeout=8).json()
-            created = next((e["eventDate"] for e in rdap.get("events", []) if e.get("eventAction")=="registration"), None)
-            expires = next((e["eventDate"] for e in rdap.get("events", []) if e.get("eventAction")=="expiration"), None)
-            registrar = (rdap.get("entities",[{}])[0].get("vcardArray",[None,[]])[1][1][3]
-                         if rdap.get("entities") else None)
-            def fmt(d): return None if not d else d.split("T")[0]
+            j = requests.get(f"{base}/domain/{dom}", timeout=8).json()
+            created, expires = _rdap_events_to_dates(j)
             expiry_days = None
             if expires:
                 d0 = dt.datetime.utcnow().date()
                 d1 = dt.datetime.fromisoformat(expires.replace("Z","")).date()
                 expiry_days = (d1 - d0).days
-            return {"created": fmt(created), "expiry": fmt(expires),
-                    "days_to_expire": expiry_days, "registrar": registrar}
+            registrar = None
+            for ent in j.get("entities", []) or []:
+                if ent.get("roles") and "registrar" in [r.lower() for r in ent["roles"]]:
+                    va = (ent.get("vcardArray") or [None, []])[1]
+                    for item in va:
+                        if item and len(item) >= 4 and item[0] in ("fn","org"):
+                            registrar = item[3]
+                            break
+                    if registrar: break
+            return {"created": created, "expiry": expires, "days_to_expire": expiry_days, "registrar": registrar}
     except Exception:
         pass
+
     return {"created": None, "expiry": None, "days_to_expire": None, "registrar": None}
 
 # ---------- PSI ----------
@@ -72,20 +114,26 @@ def _parse_psi(j):
 def get_pagespeed(url):
     base = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
     key = os.getenv("PSI_KEY")
-    try:
-        params = {"url": url, "strategy": "desktop"}
+    def call(strategy):
+        params = {"url": url, "strategy": strategy}
         if key: params["key"] = key
-        r = requests.get(base, params=params, timeout=20)
-        j = r.json()
+        r = requests.get(base, params=params, timeout=25)
+        try:
+            return r.json()
+        except Exception:
+            return {"error": {"message": f"Non-JSON from PSI (HTTP {r.status_code})"}}
+
+    try:
+        j = call("desktop")
         if "error" in j or not j.get("lighthouseResult"):
-            params["strategy"] = "mobile"
-            r = requests.get(base, params=params, timeout=20)
-            j = r.json()
+            j = call("mobile")
         if "error" in j or not j.get("lighthouseResult"):
-            return {}
+            # surface the reason so your frontend can display it
+            return {"error": j.get("error", {}).get("message", "No PSI data")}
         return _parse_psi(j)
-    except Exception:
-        return {}
+    except Exception as e:
+        return {"error": str(e)}
+
 
 
 # ---------- fast link checker ----------
@@ -297,4 +345,5 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
