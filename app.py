@@ -1,7 +1,7 @@
 import io, re, os, datetime as dt
 from urllib.parse import urlparse
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
-
 import requests
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
@@ -75,17 +75,18 @@ def get_pagespeed(url):
     try:
         params = {"url": url, "strategy": "desktop"}
         if key: params["key"] = key
-        r = requests.get(base, params=params, timeout=30)
+        r = requests.get(base, params=params, timeout=20)
         j = r.json()
         if "error" in j or not j.get("lighthouseResult"):
             params["strategy"] = "mobile"
-            r = requests.get(base, params=params, timeout=30)
+            r = requests.get(base, params=params, timeout=20)
             j = r.json()
         if "error" in j or not j.get("lighthouseResult"):
             return {}
         return _parse_psi(j)
     except Exception:
         return {}
+
 
 # ---------- fast link checker ----------
 def _fast_status(u):
@@ -207,16 +208,30 @@ def analyze():
 
     results = {"speed": {}, "domain": {}, "seo": {"issues": []}, "links": []}
 
-    def _speed():  return ("speed", get_pagespeed(url))
-    def _domain(): return ("domain", get_domain_info(url))
+    def _speed():
+        try:    return ("speed", get_pagespeed(url))
+        except Exception as e:
+            app.logger.warning(f"PSI failed for {url}: {e}")
+            return ("speed", {})
+
+    def _domain():
+        try:    return ("domain", get_domain_info(url))
+        except Exception as e:
+            app.logger.warning(f"RDAP failed for {url}: {e}")
+            return ("domain", {})
+
     def _seo():
-        x = analyze_html(url)
-        return ("seo_links", x)
+        try:
+            x = analyze_html(url)
+            return ("seo_links", x)
+        except Exception as e:
+            app.logger.warning(f"HTML analyze failed for {url}: {e}")
+            return ("seo_links", {"issues": [], "links": []})
 
     try:
         with ThreadPoolExecutor(max_workers=3) as ex:
             futs = [ex.submit(_speed), ex.submit(_domain), ex.submit(_seo)]
-            for fut in as_completed(futs, timeout=22):  # whole call budget
+            for fut in as_completed(futs, timeout=18):  # whole call budget
                 k, v = fut.result()
                 if k == "seo_links":
                     results["seo"] = {"issues": v.get("issues", [])}
@@ -224,13 +239,14 @@ def analyze():
                 else:
                     results[k] = v
     except TimeoutError:
-        # return partial results instead of 500
-        pass
-    except Exception:
-        # swallow unexpected exceptions & return partial
+        app.logger.warning(f"/analyze timeout for {url}")
+        # Return whatever we have (partial results) instead of 500
+    except Exception as e:
+        app.logger.exception(f"/analyze crashed for {url}: {e}")
         results["error"] = "partial_results_due_to_exception"
 
     return jsonify(results)
+
 
 @app.route("/report")
 def report():
@@ -281,3 +297,4 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
