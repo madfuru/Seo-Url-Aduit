@@ -6,7 +6,8 @@ from bs4 import BeautifulSoup
 from flask import Flask
 from flask_cors import CORS
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError  # <-- this one matters
 
 app = Flask(__name__)
 CORS(app)  # allow browser calls from your WP domain
@@ -210,13 +211,39 @@ def _fast_status(u):
 # ---------- Routes ----------
 @app.route("/analyze")
 def analyze():
-    url = request.args.get("url","").strip()
+    url = request.args.get("url", "").strip()
     if not url:
-        return jsonify({"error":"missing url"}), 400
-    speed = get_pagespeed(url)
-    domain = get_domain_info(url)
-    seo = analyze_html(url)
-    return jsonify({"speed": speed, "domain": domain, "seo": {"issues": seo["issues"]}, "links": seo["links"]})
+        return jsonify({"error": "missing url"}), 400
+
+    results = {"speed": {}, "domain": {}, "seo": {"issues": []}, "links": []}
+
+    def _speed():  return ("speed", get_pagespeed(url))
+    def _domain(): return ("domain", get_domain_info(url))
+    def _seo():
+        x = analyze_html(url)
+        return ("seo_links", x)
+
+    try:
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            futs = [ex.submit(_speed), ex.submit(_domain), ex.submit(_seo)]
+            for fut in as_completed(futs, timeout=25):  # time budget
+                k, v = fut.result()
+                if k == "seo_links":
+                    results["seo"] = {"issues": v.get("issues", [])}
+                    results["links"] = v.get("links", [])
+                else:
+                    results[k] = v
+    except TimeoutError as e:
+        # one of the futures exceeded the 25s window; return whatever we have
+        app.logger.warning(f"/analyze timeout for {url}: {e}")
+    except Exception as e:
+        app.logger.exception(f"/analyze crashed for {url}: {e}")
+        # still return best-effort JSON instead of 500
+        # (optional) include a hint field:
+        results["error"] = "partial_results_due_to_exception"
+
+    return jsonify(results)
+
 
 @app.route("/")
 def home():
@@ -297,6 +324,7 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
