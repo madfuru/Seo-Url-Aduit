@@ -55,17 +55,6 @@ def get_domain_info(u):
         pass
     # If RDAP fails, return minimal
     return {"created": None, "expiry": None, "days_to_expire": None, "registrar": None}
-    
-def _fast_status(url):
-    try:
-        r = requests.head(url, timeout=3, allow_redirects=True)
-        code = r.status_code
-        if code in (403, 405):  # some sites block HEAD
-            r = requests.get(url, timeout=4, allow_redirects=True, stream=False)
-            code = r.status_code
-        return {"href": url, "status": code}
-    except Exception:
-        return {"href": url, "status": 0}
 
 
 # ----- Google PSI (no key needed for basic; key recommended for quota) -----
@@ -117,19 +106,20 @@ def analyze_html(url):
         res = fetch(url)
         status = res.status_code
         if status != 200:
-            issues.append({"severity":"error","message":f"HTTP status {status} (not 200)."})
+            issues.append({"severity": "error", "message": f"HTTP status {status} (not 200)."})
         if not url.startswith("https://"):
-            issues.append({"severity":"warn","message":"URL is not HTTPS."})
+            issues.append({"severity": "warn", "message": "URL is not HTTPS."})
+
         soup = BeautifulSoup(res.text, "html.parser")
 
-        # title
+        # ---- <title>
         title = safe_text(soup.find("title"))
         if not title:
             issues.append({"severity":"error","message":"Missing <title>."})
         elif len(title) > 60:
             issues.append({"severity":"warn","message":"Title length > 60 characters."})
 
-        # meta description
+        # ---- meta description
         md = soup.find("meta", attrs={"name":"description"})
         desc = (md.get("content","").strip() if md else "")
         if not desc:
@@ -137,14 +127,14 @@ def analyze_html(url):
         elif len(desc) > 160:
             issues.append({"severity":"warn","message":"Meta description > 160 characters."})
 
-        # H1
+        # ---- H1
         h1s = [safe_text(h) for h in soup.find_all(re.compile("^h1$"))]
         if len(h1s) == 0:
             issues.append({"severity":"warn","message":"Missing H1."})
         elif len(h1s) > 1:
             issues.append({"severity":"warn","message":f"Multiple H1s ({len(h1s)})."})
 
-        # canonical
+        # ---- canonical
         can = soup.find("link", rel="canonical")
         if not can or not can.get("href"):
             issues.append({"severity":"warn","message":"Missing canonical link."})
@@ -156,24 +146,25 @@ def analyze_html(url):
             except Exception:
                 issues.append({"severity":"warn","message":"Canonical URL not reachable."})
 
-        # robots / noindex
+        # ---- robots / noindex
         robots_meta = soup.find("meta", attrs={"name":"robots"})
         if robots_meta and "noindex" in robots_meta.get("content","").lower():
             issues.append({"severity":"error","message":"Page has noindex meta."})
 
-        # images
+        # ---- images (quick checks)
         big_imgs = 0
         noalt_imgs = 0
         for img in soup.find_all("img"):
             if not img.get("alt","").strip():
                 noalt_imgs += 1
             src = img.get("src")
-            if not src: continue
+            if not src:
+                continue
             try:
                 img_url = src if src.startswith("http") else requests.compat.urljoin(url, src)
-                ih = requests.head(img_url, timeout=10, allow_redirects=True)
+                ih = requests.head(img_url, timeout=3, allow_redirects=True)  # faster
                 size = ih.headers.get("content-length")
-                if size and size.isdigit() and int(size) > 150*1024:
+                if size and size.isdigit() and int(size) > 150 * 1024:
                     big_imgs += 1
             except Exception:
                 pass
@@ -182,10 +173,8 @@ def analyze_html(url):
         if big_imgs > 0:
             issues.append({"severity":"warn","message":f"{big_imgs} large image(s) >150KB."})
 
-        # links (sample up to 100)
-                # --- Links: same-domain only, small sample, parallel & fast ---
+        # ---- Links: same-domain only, small sample, parallel & fast
         page_host = urlparse(url).netloc.lower()
-        # Collect candidates (same domain), limit hard to keep fast
         candidates = []
         for a in soup.find_all("a", limit=200):
             href = a.get("href")
@@ -194,20 +183,29 @@ def analyze_html(url):
             full = href if href.startswith("http") else requests.compat.urljoin(url, href)
             if urlparse(full).netloc.lower() == page_host:
                 candidates.append(full)
-            if len(candidates) >= 12:   # <= 12 links keeps it snappy
+            if len(candidates) >= 12:  # keep it snappy
                 break
 
         links = []
         if candidates:
-            # Run status checks concurrently
             with ThreadPoolExecutor(max_workers=8) as ex:
                 futures = [ex.submit(_fast_status, c) for c in candidates]
                 for fut in as_completed(futures):
                     links.append(fut.result())
 
         return {"issues": issues, "links": links}
-    except Exception as e:
+    except Exception:
         return {"issues":[{"severity":"error","message":"Fetch failed or invalid HTML."}], "links":[]}
+def _fast_status(u):
+    try:
+        r = requests.head(u, timeout=3, allow_redirects=True)
+        code = r.status_code
+        if code in (403, 405):  # some servers block HEAD
+            r = requests.get(u, timeout=4, allow_redirects=True, stream=False)
+            code = r.status_code
+        return {"href": u, "status": code}
+    except Exception:
+        return {"href": u, "status": 0}
 
 # ---------- Routes ----------
 @app.route("/analyze")
@@ -299,6 +297,7 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
