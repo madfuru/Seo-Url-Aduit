@@ -179,6 +179,10 @@ def analyze():
     seo = analyze_html(url)
     return jsonify({"speed": speed, "domain": domain, "seo": {"issues": seo["issues"]}, "links": seo["links"]})
 
+@app.route("/")
+def home():
+    return jsonify({"ok": True, "service": "seo-url-audit"})
+
 # ---------- PPTX ----------
 from pptx import Presentation
 from pptx.util import Inches, Pt
@@ -253,4 +257,5 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
