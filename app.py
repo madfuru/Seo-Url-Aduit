@@ -1,7 +1,7 @@
 import io, re, os, datetime as dt
 from urllib.parse import urlparse
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError, wait
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from bs4 import BeautifulSoup
@@ -255,58 +255,40 @@ def _any_error(e):
 
 @app.route("/analyze")
 def analyze():
-    url = request.args.get("url", "").strip()
+    url = request.args.get("url","").strip()
     if not url:
-        return jsonify({"error": "missing url"}), 400
+        return jsonify({"error":"missing url"}), 400
 
-    results = {"speed": {}, "domain": {}, "seo": {"issues": []}, "links": []}
+    results = {"speed": {}, "domain": {}, "seo": {"issues":[]}, "links": []}
 
-    def _speed():  return ("speed_both", get_pagespeed_both(url))
-    ...
-    for fut in as_completed(futs, timeout=22):
-        k, v = fut.result()
-        if k == "speed_both":
-            results["speed"] = v  # now contains {desktop, mobile, *_error}
-        elif k == "seo_links":
-            results["seo"] = {"issues": v.get("issues", [])}
-            results["links"] = v.get("links", [])
-        else:
-            results[k] = v
-
-
-    def _domain():
-        try:    return ("domain", get_domain_info(url))
-        except Exception as e:
-            app.logger.warning(f"RDAP failed for {url}: {e}")
-            return ("domain", {})
-
+    def _speed():  return ("speed", get_pagespeed_both(url))
+    def _domain(): return ("domain", get_domain_info(url))
     def _seo():
-        try:
-            x = analyze_html(url)
-            return ("seo_links", x)
-        except Exception as e:
-            app.logger.warning(f"HTML analyze failed for {url}: {e}")
-            return ("seo_links", {"issues": [], "links": []})
+        x = analyze_html(url)
+        return ("seo_links", x)
 
-    try:
-        with ThreadPoolExecutor(max_workers=3) as ex:
-            futs = [ex.submit(_speed), ex.submit(_domain), ex.submit(_seo)]
-            for fut in as_completed(futs, timeout=18):  # whole call budget
-                k, v = fut.result()
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        fut_map = {
+            ex.submit(_speed): "speed",
+            ex.submit(_domain): "domain",
+            ex.submit(_seo): "seo_links"
+        }
+        done, not_done = wait(fut_map.keys(), timeout=22)
+        # cancel anything slow
+        for f in not_done: f.cancel()
+        # collect what we have safely
+        for f in done:
+            try:
+                k, v = f.result()
                 if k == "seo_links":
-                    results["seo"] = {"issues": v.get("issues", [])}
+                    results["seo"]   = {"issues": v.get("issues", [])}
                     results["links"] = v.get("links", [])
                 else:
                     results[k] = v
-    except TimeoutError:
-        app.logger.warning(f"/analyze timeout for {url}")
-        # Return whatever we have (partial results) instead of 500
-    except Exception as e:
-        app.logger.exception(f"/analyze crashed for {url}: {e}")
-        results["error"] = "partial_results_due_to_exception"
+            except Exception as e:
+                app.logger.warning(f"Worker {fut_map[f]} failed: {e}")
 
     return jsonify(results)
-
 
 @app.route("/report")
 def report():
@@ -357,6 +339,7 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
