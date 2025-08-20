@@ -1,4 +1,4 @@
-import io, re, os, datetime as dt
+import io, re, os, datetime as dt, _re
 from urllib.parse import urlparse
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError, wait
@@ -13,8 +13,9 @@ app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 # ---------- helpers ----------
-UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
-(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+UA = {"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+
 
 def fetch(url, timeout=12):
     return requests.get(url, timeout=timeout, headers=UA, allow_redirects=True)
@@ -25,17 +26,17 @@ def safe_text(el):
 def domain_from_url(u):
     return urlparse(u).netloc.lower()
 
-# ---------- RDAP ----------
-def _rdap_events_to_dates(rdap_json):
+
+# --- RDAP with quick universal endpoint first ---
+def _rdap_events_to_dates(j):
     created = expires = None
-    for e in rdap_json.get("events", []) or []:
+    for e in (j.get("events") or []):
         act = (e.get("eventAction") or "").lower()
-        if act in ("registration", "creation"):
-            created = e.get("eventDate")
-        elif act in ("expiration", "expiry", "expire"):
-            expires = e.get("eventDate")
-    def fmt(d): return None if not d else d.split("T")[0]
+        if act in ("registration","creation"): created = e.get("eventDate")
+        if act in ("expiration","expiry","expire"): expires = e.get("eventDate")
+    fmt = lambda d: None if not d else d.split("T")[0]
     return fmt(created), fmt(expires)
+
 
 def get_domain_info(u):
     dom = domain_from_url(u)
@@ -94,7 +95,8 @@ def get_domain_info(u):
     return {"created": None, "expiry": None, "days_to_expire": None, "registrar": None}
 
 # ---------- PSI ----------
-
+PSI_CACHE = {}
+PSI_TTL = 60*60*24
 def _psi_call(url, strategy, key=None, timeout=22):
     base = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
     params = {"url": url, "strategy": strategy}
@@ -151,97 +153,71 @@ def _fast_status(u):
 def analyze_html(url):
     issues, links = [], []
     try:
-        res = fetch(url, timeout=12)
+        res = fetch(url, timeout=8)
         if res.status_code != 200:
-            issues.append({"severity": "error", "message": f"HTTP status {res.status_code} (not 200)."})
+            issues.append({"severity":"error","message":f"HTTP status {res.status_code} (not 200)."})
         if not url.startswith("https://"):
             issues.append({"severity":"warn","message":"URL is not HTTPS."})
 
         soup = BeautifulSoup(res.text, "html.parser")
 
-        # title
-        title = safe_text(soup.find("title"))
-        if not title:
-            issues.append({"severity":"error","message":"Missing <title>."})
-        elif len(title) > 60:
-            issues.append({"severity":"warn","message":"Title length > 60 characters."})
+        title = (soup.find("title").get_text(" ", strip=True) if soup.find("title") else "").strip()
+        if not title: issues.append({"severity":"error","message":"Missing <title>."})
+        elif len(title) > 60: issues.append({"severity":"warn","message":"Title length > 60 characters."})
 
-        # meta description
         md = soup.find("meta", attrs={"name":"description"})
         desc = (md.get("content","").strip() if md else "")
-        if not desc:
-            issues.append({"severity":"warn","message":"Missing meta description."})
-        elif len(desc) > 160:
-            issues.append({"severity":"warn","message":"Meta description > 160 characters."})
+        if not desc: issues.append({"severity":"warn","message":"Missing meta description."})
+        elif len(desc) > 160: issues.append({"severity":"warn","message":"Meta description > 160 characters."})
 
-        # H1
-        import re as _re
-        h1s = [safe_text(h) for h in soup.find_all(_re.compile("^h1$"))]
-        if len(h1s) == 0:
-            issues.append({"severity":"warn","message":"Missing H1."})
-        elif len(h1s) > 1:
-            issues.append({"severity":"warn","message":f"Multiple H1s ({len(h1s)})."})
+        h1s = [h.get_text(" ", strip=True) for h in soup.find_all(_re.compile("^h1$"))]
+        if len(h1s)==0: issues.append({"severity":"warn","message":"Missing H1."})
+        elif len(h1s)>1: issues.append({"severity":"warn","message":f"Multiple H1s ({len(h1s)})."})
 
-        # canonical
         can = soup.find("link", rel="canonical")
         if not can or not can.get("href"):
             issues.append({"severity":"warn","message":"Missing canonical link."})
         else:
             try:
-                cr = fetch(can.get("href"), timeout=6)
+                cr = fetch(can.get("href"), timeout=4)
                 if cr.status_code != 200:
                     issues.append({"severity":"warn","message":"Canonical URL not returning 200."})
             except Exception:
                 issues.append({"severity":"warn","message":"Canonical URL not reachable."})
 
-        # robots / noindex
         robots_meta = soup.find("meta", attrs={"name":"robots"})
         if robots_meta and "noindex" in robots_meta.get("content","").lower():
             issues.append({"severity":"error","message":"Page has noindex meta."})
 
-        # images (quick)
-        big_imgs = 0
-        noalt_imgs = 0
-        for img in soup.find_all("img"):
-            if not img.get("alt","").strip():
-                noalt_imgs += 1
-            src = img.get("src")
-            if not src: continue
-            try:
-                img_url = src if src.startswith("http") else requests.compat.urljoin(url, src)
-                ih = requests.head(img_url, timeout=2, allow_redirects=True, headers=UA)
-                size = ih.headers.get("content-length")
-                if size and size.isdigit() and int(size) > 150*1024:
-                    big_imgs += 1
-            except Exception:
-                pass
-        if noalt_imgs > 0:
-            issues.append({"severity":"warn","message":f"{noalt_imgs} image(s) without alt."})
-        if big_imgs > 0:
-            issues.append({"severity":"warn","message":f"{big_imgs} large image(s) >150KB."})
+        # super-fast image checks (no big HEAD calls)
+        noalt = sum(1 for img in soup.find_all("img") if not (img.get("alt") or "").strip())
+        if noalt > 0:
+            issues.append({"severity":"warn","message":f"{noalt} image(s) without alt."})
 
-        # links: same-domain only, tiny sample, parallel
+        # tiny same-domain link sample (<=6) with short timeouts
         page_host = urlparse(url).netloc.lower()
-        candidates = []
-        for a in soup.find_all("a", limit=200):
-            href = a.get("href")
+        cands = []
+        for a in soup.find_all("a", limit=120):
+            href = a.get("href"); 
             if not href or href.startswith("#"): continue
             full = href if href.startswith("http") else requests.compat.urljoin(url, href)
             if urlparse(full).netloc.lower() == page_host:
-                candidates.append(full)
-            if len(candidates) >= 8:
-                break
+                cands.append(full)
+            if len(cands) >= 6: break
 
-        if candidates:
-            with ThreadPoolExecutor(max_workers=8) as ex:
-                futures = [ex.submit(_fast_status, c) for c in candidates]
-                for fut in as_completed(futures):
-                    links.append(fut.result())
+        if cands:
+            with ThreadPoolExecutor(max_workers=6) as ex:
+                futs = [ex.submit(lambda u: requests.head(u, timeout=2, allow_redirects=True, headers=UA), c) for c in cands]
+                for i, f in enumerate(futs):
+                    try:
+                        r = f.result(timeout=3)
+                        links.append({"href": cands[i], "status": r.status_code})
+                    except Exception:
+                        links.append({"href": cands[i], "status": 0})
 
         return {"issues": issues, "links": links}
     except Exception:
         return {"issues":[{"severity":"error","message":"Fetch failed or invalid HTML."}], "links":[]}
-
 # ---------- routes ----------
 @app.route("/")
 def health():
@@ -267,28 +243,31 @@ def analyze():
         x = analyze_html(url)
         return ("seo_links", x)
 
+    # run in parallel with a hard 18s budget
     with ThreadPoolExecutor(max_workers=3) as ex:
         fut_map = {
             ex.submit(_speed): "speed",
             ex.submit(_domain): "domain",
             ex.submit(_seo): "seo_links"
         }
-        done, not_done = wait(fut_map.keys(), timeout=22)
+        done, not_done = wait(fut_map.keys(), timeout=18)
         # cancel anything slow
-        for f in not_done: f.cancel()
-        # collect what we have safely
+        for f in not_done:
+            f.cancel()
+        # collect what we have
         for f in done:
             try:
                 k, v = f.result()
                 if k == "seo_links":
-                    results["seo"]   = {"issues": v.get("issues", [])}
+                    results["seo"] = {"issues": v.get("issues", [])}
                     results["links"] = v.get("links", [])
                 else:
                     results[k] = v
             except Exception as e:
-                app.logger.warning(f"Worker {fut_map[f]} failed: {e}")
+                app.logger.warning(f"worker {fut_map[f]} failed: {e}")
 
     return jsonify(results)
+
 
 @app.route("/report")
 def report():
@@ -339,6 +318,7 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
