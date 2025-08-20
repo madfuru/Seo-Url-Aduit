@@ -100,22 +100,27 @@ def get_domain_info(u):
 PSI_CACHE = {}
 PSI_TTL = 60*60*24
 def _psi_call(url, strategy, key=None, timeout=22):
+    now = time.time()
+    ck = (url, strategy)
+    if ck in PSI_CACHE and now - PSI_CACHE[ck][0] < PSI_TTL:
+        return PSI_CACHE[ck][1]
     base = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
     params = {"url": url, "strategy": strategy}
-    if key: params["key"] = key
+    if key:
+        params["key"] = key               # <-- must include your key
     r = requests.get(base, params=params, timeout=timeout)
     try:
-        return r.json()
+        data = r.json()
     except Exception:
-        return {"error": {"message": f"Non-JSON from PSI (HTTP {r.status_code})"}}
+        data = {"error": {"message": f"Non-JSON from PSI (HTTP {r.status_code})"}}
+    PSI_CACHE[ck] = (now, data)
+    return data
 
 def _psi_parse(j):
     if not j or "error" in j or not j.get("lighthouseResult"):
-        return None, (j.get("error", {}) or {}).get("message", "No PSI data")
-    lhr = j.get("lighthouseResult", {}) or {}
-    audits = lhr.get("audits", {}) or {}
-    cats = lhr.get("categories", {}) or {}
-    perf = cats.get("performance", {}).get("score")
+        return None, (j.get("error",{}) or {}).get("message","No PSI data")
+    lhr = j["lighthouseResult"]; audits = lhr.get("audits",{}); cats = lhr.get("categories",{})
+    perf = cats.get("performance",{}).get("score")
     def val(k):
         a = audits.get(k, {}) or {}
         return a.get("numericValue", a.get("displayValue"))
@@ -123,23 +128,22 @@ def _psi_parse(j):
         "performance_score": round((perf or 0)*100) if perf is not None else None,
         "fcp": val("first-contentful-paint"),
         "lcp": val("largest-contentful-paint"),
-        "cls": (audits.get("cumulative-layout-shift", {}) or {}).get("numericValue"),
-        "tbt": (audits.get("total-blocking-time", {}) or {}).get("numericValue"),
-        "inp": (audits.get("experimental-interaction-to-next-paint", {}) or {}).get("numericValue"),
+        "cls": (audits.get("cumulative-layout-shift",{}) or {}).get("numericValue"),
+        "tbt": (audits.get("total-blocking-time",{}) or {}).get("numericValue"),
+        "inp": (audits.get("experimental-interaction-to-next-paint",{}) or {}).get("numericValue"),
     }, None
 
 def get_pagespeed_both(url):
-    key = os.getenv("AIzaSyACCvLvtwEshUM1YGz8U2RNDzihEJ3dJJE")
-    desk_raw = _psi_call(url, "desktop", key=key, timeout=22)
-    # parse -> desktop / desktop_error
-    mob_raw  = _psi_call(url, "mobile",  key=key, timeout=22)
-    # parse -> mobile / mobile_error
+    key = os.getenv("PSI_KEY")            # set this in Render → Environment
+    d_raw = _psi_call(url, "desktop", key=key)
+    desktop, d_err = _psi_parse(d_raw)
+    m_raw = _psi_call(url, "mobile",  key=key)
+    mobile,  m_err = _psi_parse(m_raw)
     return {
-        "desktop": desktop, "desktop_error": desk_err,
-        "mobile":  mobile,  "mobile_error":  mob_err,
-        "using_key": bool(key)  # debug flag
+        "desktop": desktop, "desktop_error": d_err,
+        "mobile":  mobile,  "mobile_error":  m_err,
+        "using_key": bool(key)             # helpful debug flag
     }
-
 
 # ---------- fast link checker ----------
 def _fast_status(u):
@@ -246,13 +250,12 @@ def analyze():
 
     results = {"speed": {}, "domain": {}, "seo": {"issues":[]}, "links": []}
 
-    def _speed():  return ("speed", get_pagespeed_both(url))
+    def _speed():  return ("speed", get_pagespeed_both(url))  # <-- IMPORTANT
     def _domain(): return ("domain", get_domain_info(url))
     def _seo():
         x = analyze_html(url)
         return ("seo_links", x)
 
-    # run in parallel with a hard 18s budget
     with ThreadPoolExecutor(max_workers=3) as ex:
         fut_map = {
             ex.submit(_speed): "speed",
@@ -260,18 +263,15 @@ def analyze():
             ex.submit(_seo): "seo_links"
         }
         done, not_done = wait(fut_map.keys(), timeout=18)
-        # cancel anything slow
-        for f in not_done:
-            f.cancel()
-        # collect what we have
+        for f in not_done: f.cancel()
         for f in done:
             try:
                 k, v = f.result()
                 if k == "seo_links":
-                    results["seo"] = {"issues": v.get("issues", [])}
+                    results["seo"]   = {"issues": v.get("issues", [])}
                     results["links"] = v.get("links", [])
                 else:
-                    results[k] = v
+                    results[k] = v                       # puts speed/domain into results
             except Exception as e:
                 app.logger.warning(f"worker {fut_map[f]} failed: {e}")
 
@@ -327,6 +327,7 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
