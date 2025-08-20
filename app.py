@@ -2,11 +2,11 @@ import io, re, os, datetime as dt
 from urllib.parse import urlparse
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
-import requests
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from bs4 import BeautifulSoup
 from pptx import Presentation
+import os, requests
 
 app = Flask(__name__)
 # allow all origins (simplest); later you can restrict to your WP domain
@@ -94,7 +94,8 @@ def get_domain_info(u):
     return {"created": None, "expiry": None, "days_to_expire": None, "registrar": None}
 
 # ---------- PSI ----------
-def _psi_call(url, strategy, key=None, timeout=25):
+
+def _psi_call(url, strategy, key=None, timeout=22):
     base = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
     params = {"url": url, "strategy": strategy}
     if key: params["key"] = key
@@ -106,7 +107,7 @@ def _psi_call(url, strategy, key=None, timeout=25):
 
 def _psi_parse(j):
     if not j or "error" in j or not j.get("lighthouseResult"):
-        return None, j.get("error", {}).get("message", "No PSI data")
+        return None, (j.get("error", {}) or {}).get("message", "No PSI data")
     lhr = j.get("lighthouseResult", {}) or {}
     audits = lhr.get("audits", {}) or {}
     cats = lhr.get("categories", {}) or {}
@@ -114,28 +115,25 @@ def _psi_parse(j):
     def val(k):
         a = audits.get(k, {}) or {}
         return a.get("numericValue", a.get("displayValue"))
-    data = {
+    return {
         "performance_score": round((perf or 0)*100) if perf is not None else None,
         "fcp": val("first-contentful-paint"),
         "lcp": val("largest-contentful-paint"),
         "cls": (audits.get("cumulative-layout-shift", {}) or {}).get("numericValue"),
         "tbt": (audits.get("total-blocking-time", {}) or {}).get("numericValue"),
         "inp": (audits.get("experimental-interaction-to-next-paint", {}) or {}).get("numericValue"),
-    }
-    return data, None
+    }, None
 
 def get_pagespeed_both(url):
-    """Return both desktop and mobile results with error messages if any."""
-    key = os.getenv("AIzaSyDQSCDmfTMievyBudwEgRhaw2sbFzpEq7U")  # optional but recommended
-    # try desktop first (often faster/more reliable), then mobile
+    key = os.getenv("PSI_KEY")
     desk_raw = _psi_call(url, "desktop", key=key, timeout=22)
-    desk, desk_err = _psi_parse(desk_raw)
+    desktop, desk_err = _psi_parse(desk_raw)
     mob_raw  = _psi_call(url, "mobile",  key=key, timeout=22)
-    mob, mob_err = _psi_parse(mob_raw)
-    return {"desktop": desk, "desktop_error": desk_err,
-            "mobile": mob, "mobile_error": mob_err}
-
-
+    mobile,  mob_err  = _psi_parse(mob_raw)
+    return {
+        "desktop": desktop, "desktop_error": desk_err,
+        "mobile":  mobile,  "mobile_error":  mob_err
+    }
 
 # ---------- fast link checker ----------
 def _fast_status(u):
@@ -249,6 +247,12 @@ def analyze_html(url):
 def health():
     return jsonify({"ok": True, "service": "seo-url-audit"})
 
+@app.errorhandler(Exception)
+def _any_error(e):
+    # Log the stack trace in Render logs, but don't 500 the browser.
+    app.logger.exception(f"Unhandled error: {e}")
+    return jsonify({"error": "server_error", "detail": str(e)[:120]}), 200
+
 @app.route("/analyze")
 def analyze():
     url = request.args.get("url", "").strip()
@@ -353,6 +357,7 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
