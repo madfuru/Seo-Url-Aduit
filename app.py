@@ -94,7 +94,19 @@ def get_domain_info(u):
     return {"created": None, "expiry": None, "days_to_expire": None, "registrar": None}
 
 # ---------- PSI ----------
-def _parse_psi(j):
+def _psi_call(url, strategy, key=None, timeout=25):
+    base = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
+    params = {"url": url, "strategy": strategy}
+    if key: params["key"] = key
+    r = requests.get(base, params=params, timeout=timeout)
+    try:
+        return r.json()
+    except Exception:
+        return {"error": {"message": f"Non-JSON from PSI (HTTP {r.status_code})"}}
+
+def _psi_parse(j):
+    if not j or "error" in j or not j.get("lighthouseResult"):
+        return None, j.get("error", {}).get("message", "No PSI data")
     lhr = j.get("lighthouseResult", {}) or {}
     audits = lhr.get("audits", {}) or {}
     cats = lhr.get("categories", {}) or {}
@@ -102,7 +114,7 @@ def _parse_psi(j):
     def val(k):
         a = audits.get(k, {}) or {}
         return a.get("numericValue", a.get("displayValue"))
-    return {
+    data = {
         "performance_score": round((perf or 0)*100) if perf is not None else None,
         "fcp": val("first-contentful-paint"),
         "lcp": val("largest-contentful-paint"),
@@ -110,29 +122,18 @@ def _parse_psi(j):
         "tbt": (audits.get("total-blocking-time", {}) or {}).get("numericValue"),
         "inp": (audits.get("experimental-interaction-to-next-paint", {}) or {}).get("numericValue"),
     }
+    return data, None
 
-def get_pagespeed(url):
-    base = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
-    key = os.getenv("PSI_KEY")
-    def call(strategy):
-        params = {"url": url, "strategy": strategy}
-        if key: params["key"] = key
-        r = requests.get(base, params=params, timeout=25)
-        try:
-            return r.json()
-        except Exception:
-            return {"error": {"message": f"Non-JSON from PSI (HTTP {r.status_code})"}}
-
-    try:
-        j = call("desktop")
-        if "error" in j or not j.get("lighthouseResult"):
-            j = call("mobile")
-        if "error" in j or not j.get("lighthouseResult"):
-            # surface the reason so your frontend can display it
-            return {"error": j.get("error", {}).get("message", "No PSI data")}
-        return _parse_psi(j)
-    except Exception as e:
-        return {"error": str(e)}
+def get_pagespeed_both(url):
+    """Return both desktop and mobile results with error messages if any."""
+    key = os.getenv("AIzaSyDQSCDmfTMievyBudwEgRhaw2sbFzpEq7U")  # optional but recommended
+    # try desktop first (often faster/more reliable), then mobile
+    desk_raw = _psi_call(url, "desktop", key=key, timeout=22)
+    desk, desk_err = _psi_parse(desk_raw)
+    mob_raw  = _psi_call(url, "mobile",  key=key, timeout=22)
+    mob, mob_err = _psi_parse(mob_raw)
+    return {"desktop": desk, "desktop_error": desk_err,
+            "mobile": mob, "mobile_error": mob_err}
 
 
 
@@ -256,11 +257,18 @@ def analyze():
 
     results = {"speed": {}, "domain": {}, "seo": {"issues": []}, "links": []}
 
-    def _speed():
-        try:    return ("speed", get_pagespeed(url))
-        except Exception as e:
-            app.logger.warning(f"PSI failed for {url}: {e}")
-            return ("speed", {})
+    def _speed():  return ("speed_both", get_pagespeed_both(url))
+    ...
+    for fut in as_completed(futs, timeout=22):
+        k, v = fut.result()
+        if k == "speed_both":
+            results["speed"] = v  # now contains {desktop, mobile, *_error}
+        elif k == "seo_links":
+            results["seo"] = {"issues": v.get("issues", [])}
+            results["links"] = v.get("links", [])
+        else:
+            results[k] = v
+
 
     def _domain():
         try:    return ("domain", get_domain_info(url))
@@ -345,5 +353,6 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
