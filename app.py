@@ -1,5 +1,6 @@
 import io, re, os, datetime as dt
 import re as _re
+import time
 from urllib.parse import urlparse
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError, wait
@@ -130,13 +131,15 @@ def _psi_parse(j):
 def get_pagespeed_both(url):
     key = os.getenv("AIzaSyACCvLvtwEshUM1YGz8U2RNDzihEJ3dJJE")
     desk_raw = _psi_call(url, "desktop", key=key, timeout=22)
-    desktop, desk_err = _psi_parse(desk_raw)
+    # parse -> desktop / desktop_error
     mob_raw  = _psi_call(url, "mobile",  key=key, timeout=22)
-    mobile,  mob_err  = _psi_parse(mob_raw)
+    # parse -> mobile / mobile_error
     return {
         "desktop": desktop, "desktop_error": desk_err,
-        "mobile":  mobile,  "mobile_error":  mob_err
+        "mobile":  mobile,  "mobile_error":  mob_err,
+        "using_key": bool(key)  # debug flag
     }
+
 
 # ---------- fast link checker ----------
 def _fast_status(u):
@@ -230,6 +233,11 @@ def _any_error(e):
     app.logger.exception(f"Unhandled error: {e}")
     return jsonify({"error": "server_error", "detail": str(e)[:120]}), 200
 
+@app.route("/debug/psikey")
+def debug_psikey():
+    import os
+    return jsonify({"using_key": bool(os.getenv("AIzaSyACCvLvtwEshUM1YGz8U2RNDzihEJ3dJJE"))})
+
 @app.route("/analyze")
 def analyze():
     url = request.args.get("url","").strip()
@@ -319,6 +327,7 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
