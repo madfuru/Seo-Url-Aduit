@@ -243,6 +243,16 @@ def analyze_html(url):
 def health():
     return jsonify({"ok": True, "service": "seo-url-audit"})
 
+@app.route("/psi")
+def psi():
+    url = request.args.get("url","").strip()
+    if not url:
+        return jsonify({"error":"missing url"}), 400
+    # return desktop+mobile (with errors) and using_key flag
+    data = get_pagespeed_both(url)
+    return jsonify(data), 200
+
+
 @app.errorhandler(Exception)
 def _any_error(e):
     # Log the stack trace in Render logs, but don't 500 the browser.
@@ -260,22 +270,25 @@ def analyze():
     if not url:
         return jsonify({"error":"missing url"}), 400
 
+    skip_psi = request.args.get("skip_psi", "0") == "1"
+
     results = {"speed": {}, "domain": {}, "seo": {"issues":[]}, "links": []}
 
-    def _speed():  return ("speed", get_pagespeed_both(url))  # <-- IMPORTANT
+    def _speed():  return ("speed", get_pagespeed_both(url))
     def _domain(): return ("domain", get_domain_info(url))
     def _seo():
         x = analyze_html(url)
         return ("seo_links", x)
 
     with ThreadPoolExecutor(max_workers=3) as ex:
-        fut_map = {
-            ex.submit(_speed): "speed",
-            ex.submit(_domain): "domain",
-            ex.submit(_seo): "seo_links"
-        }
-        done, not_done = wait(fut_map.keys(), timeout=18)
+        futs = []
+        if not skip_psi:
+            futs.append(ex.submit(_speed))
+        futs += [ex.submit(_domain), ex.submit(_seo)]
+
+        done, not_done = wait(futs, timeout=14)  # shorter so UI is snappy
         for f in not_done: f.cancel()
+
         for f in done:
             try:
                 k, v = f.result()
@@ -283,11 +296,12 @@ def analyze():
                     results["seo"]   = {"issues": v.get("issues", [])}
                     results["links"] = v.get("links", [])
                 else:
-                    results[k] = v                       # puts speed/domain into results
+                    results[k] = v
             except Exception as e:
-                app.logger.warning(f"worker {fut_map[f]} failed: {e}")
+                app.logger.warning(f"worker failed: {e}")
 
-    return jsonify(results)
+    return jsonify(results), 200
+
 @app.route("/favicon.ico")
 def favicon():
     return Response(status=204)
@@ -356,6 +370,7 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
