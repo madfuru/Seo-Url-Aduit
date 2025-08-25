@@ -145,7 +145,7 @@ def _psi_parse(j):
 
 
 def get_pagespeed_both(url):
-    key = os.getenv("AIzaSyACCvLvtwEshUM1YGz8U2RNDzihEJ3dJJE")  # <-- CORRECT
+    key = os.getenv("PSI_KEY")  # correct
     d_raw = _psi_call(url, "desktop", key=key)
     desktop, d_err = _psi_parse(d_raw)
     m_raw = _psi_call(url, "mobile",  key=key)
@@ -356,6 +356,7 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
