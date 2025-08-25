@@ -1,11 +1,14 @@
 import io, re, os, datetime as dt
 import re as _re
 import time
+import json
 from urllib.parse import urlparse
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError, wait
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
+from flask import Response
+from werkzeug.exceptions import HTTPException
 from bs4 import BeautifulSoup
 from pptx import Presentation
 import os, requests
@@ -100,19 +103,34 @@ def get_domain_info(u):
 PSI_CACHE = {}
 PSI_TTL = 60*60*24
 def _psi_call(url, strategy, key=None, timeout=22):
+    now = time.time()
+    ck = (url, strategy)
+    if ck in PSI_CACHE and now - PSI_CACHE[ck][0] < PSI_TTL:
+        return PSI_CACHE[ck][1]
+
     base = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
     params = {"url": url, "strategy": strategy}
-    if key:
-        params["key"] = key          # <-- REQUIRED
-    r = requests.get(base, params=params, timeout=timeout)
-    return r.json()  # with your existing try/except
+    if key:                      # <-- pass your key when set
+        params["key"] = key
+
+    try:
+        r = requests.get(base, params=params, timeout=timeout)
+        try:
+            data = r.json()
+        except Exception:
+            data = {"error": {"message": f"Non-JSON from PSI (HTTP {r.status_code})"}}
+    except Exception as e:
+        data = {"error": {"message": f"PSI request failed: {e}"}}
+
+    PSI_CACHE[ck] = (now, data)
+    return data
 
 
 def _psi_parse(j):
     if not j or "error" in j or not j.get("lighthouseResult"):
-        return None, (j.get("error",{}) or {}).get("message","No PSI data")
-    lhr = j["lighthouseResult"]; audits = lhr.get("audits",{}); cats = lhr.get("categories",{})
-    perf = cats.get("performance",{}).get("score")
+        return None, (j.get("error", {}) or {}).get("message", "No PSI data")
+    lhr = j["lighthouseResult"]; audits = lhr.get("audits", {}); cats = lhr.get("categories", {})
+    perf = cats.get("performance", {}).get("score")
     def val(k):
         a = audits.get(k, {}) or {}
         return a.get("numericValue", a.get("displayValue"))
@@ -120,13 +138,14 @@ def _psi_parse(j):
         "performance_score": round((perf or 0)*100) if perf is not None else None,
         "fcp": val("first-contentful-paint"),
         "lcp": val("largest-contentful-paint"),
-        "cls": (audits.get("cumulative-layout-shift",{}) or {}).get("numericValue"),
-        "tbt": (audits.get("total-blocking-time",{}) or {}).get("numericValue"),
-        "inp": (audits.get("experimental-interaction-to-next-paint",{}) or {}).get("numericValue"),
+        "cls": (audits.get("cumulative-layout-shift", {}) or {}).get("numericValue"),
+        "tbt": (audits.get("total-blocking-time", {}) or {}).get("numericValue"),
+        "inp": (audits.get("experimental-interaction-to-next-paint", {}) or {}).get("numericValue"),
     }, None
 
+
 def get_pagespeed_both(url):
-    key = os.getenv("AIzaSyACCvLvtwEshUM1YGz8U2RNDzihEJ3dJJE")            # set this in Render → Environment
+    key = os.getenv("AIzaSyACCvLvtwEshUM1YGz8U2RNDzihEJ3dJJE")  # <-- CORRECT
     d_raw = _psi_call(url, "desktop", key=key)
     desktop, d_err = _psi_parse(d_raw)
     m_raw = _psi_call(url, "mobile",  key=key)
@@ -134,9 +153,8 @@ def get_pagespeed_both(url):
     return {
         "desktop": desktop, "desktop_error": d_err,
         "mobile":  mobile,  "mobile_error":  m_err,
-        "using_key": bool(key)             # helpful debug flag
+        "using_key": bool(key)
     }
-def _speed():  return ("speed", get_pagespeed_both(url))
 
 
 # ---------- fast link checker ----------
@@ -270,14 +288,28 @@ def analyze():
                 app.logger.warning(f"worker {fut_map[f]} failed: {e}")
 
     return jsonify(results)
-
+@app.route("/favicon.ico")
+def favicon():
+    return Response(status=204)
 
 @app.route("/report")
 def report():
     url = request.args.get("url","").strip()
     if not url:
         return "missing url", 400
-    data = {"speed": get_pagespeed(url), "domain": get_domain_info(url), "seo": analyze_html(url)}
+
+    speed_both = get_pagespeed_both(url)
+    # prefer desktop; else mobile
+    sp = speed_both.get("desktop") or speed_both.get("mobile") or {}
+    sp_err = speed_both.get("desktop_error") or speed_both.get("mobile_error")
+
+    data = {
+        "speed": sp,
+        "domain": get_domain_info(url),
+        "seo": analyze_html(url),
+        "speed_error": sp_err
+    }
+
     prs = Presentation()
     s1 = prs.slides.add_slide(prs.slide_layouts[0])
     s1.shapes.title.text = "SEO URL Audit Report"
@@ -286,10 +318,12 @@ def report():
     s2 = prs.slides.add_slide(prs.slide_layouts[1])
     s2.shapes.title.text = "Core Web Vitals"
     body = s2.placeholders[1].text_frame
-    sp = data.get("speed",{})
-    for k,v in [("Performance", sp.get("performance_score")), ("FCP", sp.get("fcp")),
-                ("LCP", sp.get("lcp")), ("CLS", sp.get("cls")), ("INP/TBT", sp.get("inp") or sp.get("tbt"))]:
-        p = body.add_paragraph(); p.text = f"{k}: {v}"
+    if sp:
+        for k,v in [("Performance", sp.get("performance_score")), ("FCP", sp.get("fcp")),
+                    ("LCP", sp.get("lcp")), ("CLS", sp.get("cls")), ("INP/TBT", sp.get("inp") or sp.get("tbt"))]:
+            p = body.add_paragraph(); p.text = f"{k}: {v}"
+    else:
+        p = body.add_paragraph(); p.text = f"Unavailable: {sp_err or 'No PSI data'}"
 
     s3 = prs.slides.add_slide(prs.slide_layouts[1])
     s3.shapes.title.text = "Domain Details"
@@ -319,8 +353,10 @@ def report():
     return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.presentationml.presentation",
                      as_attachment=True, download_name=fname)
 
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
