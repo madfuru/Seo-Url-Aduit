@@ -240,7 +240,7 @@ def _any_error(e):
 @app.route("/debug/psikey")
 def debug_psikey():
     import os
-    return jsonify({"using_key": bool(os.getenv("AIzaSyACCvLvtwEshUM1YGz8U2RNDzihEJ3dJJE"))})
+    return jsonify({"using_key": bool(os.getenv("PSI_KEY"))})
 
 @app.route("/analyze")
 def analyze():
@@ -327,6 +327,7 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
