@@ -248,9 +248,9 @@ def psi():
     url = request.args.get("url","").strip()
     if not url:
         return jsonify({"error":"missing url"}), 400
-    # return desktop+mobile (with errors) and using_key flag
-    data = get_pagespeed_both(url)
-    return jsonify(data), 200
+    if not os.getenv("PSI_KEY"):
+        return jsonify({"error":"psikey_missing"}), 200
+    return jsonify(get_pagespeed_both(url)), 200
 
 
 @app.errorhandler(Exception)
@@ -370,6 +370,7 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
