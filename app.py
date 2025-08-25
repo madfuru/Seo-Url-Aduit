@@ -100,21 +100,13 @@ def get_domain_info(u):
 PSI_CACHE = {}
 PSI_TTL = 60*60*24
 def _psi_call(url, strategy, key=None, timeout=22):
-    now = time.time()
-    ck = (url, strategy)
-    if ck in PSI_CACHE and now - PSI_CACHE[ck][0] < PSI_TTL:
-        return PSI_CACHE[ck][1]
     base = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
     params = {"url": url, "strategy": strategy}
     if key:
-        params["key"] = key               # <-- must include your key
+        params["key"] = key          # <-- REQUIRED
     r = requests.get(base, params=params, timeout=timeout)
-    try:
-        data = r.json()
-    except Exception:
-        data = {"error": {"message": f"Non-JSON from PSI (HTTP {r.status_code})"}}
-    PSI_CACHE[ck] = (now, data)
-    return data
+    return r.json()  # with your existing try/except
+
 
 def _psi_parse(j):
     if not j or "error" in j or not j.get("lighthouseResult"):
@@ -144,6 +136,8 @@ def get_pagespeed_both(url):
         "mobile":  mobile,  "mobile_error":  m_err,
         "using_key": bool(key)             # helpful debug flag
     }
+def _speed():  return ("speed", get_pagespeed_both(url))
+
 
 # ---------- fast link checker ----------
 def _fast_status(u):
@@ -327,6 +321,7 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
