@@ -107,36 +107,72 @@ PSI_CACHE = {}                    # (url, strategy) -> (timestamp, json)
 PSI_TTL = 60*60*24                # 24h
 PSI_CACHE_MAX = 50  
 
-def _psi_call(url, strategy, key=None, timeout=22):
+# at top of file (once)
+from math import ceil
+
+# ---------- PSI ----------
+PSI_CACHE = {}
+PSI_TTL = 60*60*24   # 24h
+PSI_CACHE_MAX = 50   # limit cache size
+
+def _psi_call(url, strategy, key=None, timeout=18, tries=2):
+    """
+    Call PSI with small response fields, retry on timeouts/5xx.
+    Each try uses `timeout` seconds; total budget ~ tries*timeout plus backoff.
+    """
     now = time.time()
     ck = (url, strategy)
-
-    # Serve fresh cache
     ts_data = PSI_CACHE.get(ck)
     if ts_data and now - ts_data[0] < PSI_TTL:
         return ts_data[1]
 
     base = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
-    params = {"url": url, "strategy": strategy}
+    # Ask Google to return only what we need (smaller/faster)
+    fields = (
+        "lighthouseResult(categories/performance/score,"
+        "audits/first-contentful-paint/numericValue,"
+        "audits/largest-contentful-paint/numericValue,"
+        "audits/cumulative-layout-shift/numericValue,"
+        "audits/total-blocking-time/numericValue,"
+        "audits/experimental-interaction-to-next-paint/numericValue)"
+    )
+    params = {
+        "url": url,
+        "strategy": strategy,
+        "category": "performance",
+        "fields": fields,   # Google APIs partial response
+    }
     if key:
         params["key"] = key
 
-    try:
-        r = requests.get(base, params=params, timeout=timeout)
+    last_err = None
+    for attempt in range(1, tries+1):
         try:
-            data = r.json()
-        except Exception:
-            data = {"error": {"message": f"Non-JSON from PSI (HTTP {r.status_code})"}}
-    except Exception as e:
-        data = {"error": {"message": f"PSI request failed: {e}"}}
+            r = requests.get(base, params=params, timeout=timeout)
+            # If non-JSON (rare), synthesize an error
+            try:
+                data = r.json()
+            except Exception:
+                data = {"error": {"message": f"Non-JSON from PSI (HTTP {r.status_code})"}}
+            # Cache and return
+            # Evict oldest if needed
+            if len(PSI_CACHE) >= PSI_CACHE_MAX:
+                oldest = min(PSI_CACHE, key=lambda k: PSI_CACHE[k][0])
+                PSI_CACHE.pop(oldest, None)
+            PSI_CACHE[ck] = (time.time(), data)
+            return data
+        except (requests.Timeout, requests.ConnectionError) as e:
+            last_err = f"{type(e).__name__}: {e}"
+            # simple exponential backoff: 0.6s, 1.2s, ...
+            backoff = 0.6 * (2 ** (attempt-1))
+            time.sleep(backoff)
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+            break
 
-    # Evict oldest if cache too big
-    if len(PSI_CACHE) >= PSI_CACHE_MAX:
-        oldest = min(PSI_CACHE, key=lambda k: PSI_CACHE[k][0])
-        PSI_CACHE.pop(oldest, None)
+    # If we got here, all tries failed
+    return {"error": {"message": f"PSI request failed after {tries} tries: {last_err}"}}
 
-    PSI_CACHE[ck] = (now, data)
-    return data
 
 
 
@@ -386,6 +422,7 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
