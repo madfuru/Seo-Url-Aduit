@@ -12,6 +12,14 @@ from werkzeug.exceptions import HTTPException
 from bs4 import BeautifulSoup
 from pptx import Presentation
 import os, requests
+import threading
+PSI_SEM = threading.Semaphore(2)
+PSI_CACHE_MAX = 500
+# after computing `data`:
+if len(PSI_CACHE) >= PSI_CACHE_MAX:
+    oldest_key = min(PSI_CACHE, key=lambda k: PSI_CACHE[k][0])
+    PSI_CACHE.pop(oldest_key, None)
+PSI_CACHE[ck] = (now, data)
 
 app = Flask(__name__)
 # allow all origins (simplest); later you can restrict to your WP domain
@@ -246,12 +254,14 @@ def health():
 @app.route("/psi")
 def psi():
     url = request.args.get("url","").strip()
-    if not url:
-        return jsonify({"error":"missing url"}), 400
-    if not os.getenv("PSI_KEY"):
-        return jsonify({"error":"psikey_missing"}), 200
-    return jsonify(get_pagespeed_both(url)), 200
-
+    if not url: return jsonify({"error":"missing url"}), 400
+    if not os.getenv("PSI_KEY"): return jsonify({"error":"psikey_missing"}), 200
+    if not PSI_SEM.acquire(blocking=False):
+        return jsonify({"error":"busy", "message":"Please retry in a moment"}), 429
+    try:
+        return jsonify(get_pagespeed_both(url)), 200
+    finally:
+        PSI_SEM.release()
 
 @app.errorhandler(Exception)
 def _any_error(e):
@@ -370,6 +380,7 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
