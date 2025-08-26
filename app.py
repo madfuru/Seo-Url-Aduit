@@ -106,10 +106,7 @@ PSI_SEM = threading.Semaphore(2)  # limit concurrent /psi calls per worker
 PSI_CACHE = {}                    # (url, strategy) -> (timestamp, json)
 PSI_TTL = 60*60*24                # 24h
 PSI_CACHE_MAX = 50  
-if len(PSI_CACHE) >= PSI_CACHE_MAX:
-    oldest_key = min(PSI_CACHE, key=lambda k: PSI_CACHE[k][0])
-    PSI_CACHE.pop(oldest_key, None)
-PSI_CACHE[ck] = (now, data)
+
 def _psi_call(url, strategy, key=None, timeout=22):
     now = time.time()
     ck = (url, strategy)
@@ -389,6 +386,7 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
