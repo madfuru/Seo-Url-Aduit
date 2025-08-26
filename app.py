@@ -474,70 +474,69 @@ def analyze():
 def favicon():
     return Response(status=204)
 
+
+
 @app.route("/report")
 def report():
     url = request.args.get("url","").strip()
     if not url:
         return "missing url", 400
 
-    speed_both = get_pagespeed_both(url)
-    # prefer desktop; else mobile
-    sp = speed_both.get("desktop") or speed_both.get("mobile") or {}
-    sp_err = speed_both.get("desktop_error") or speed_both.get("mobile_error")
+    # Gather data
+    speed_both = get_pagespeed_both(url)  # {desktop, desktop_error, mobile, mobile_error}
+    domain = get_domain_info(url)
+    seo = analyze_html(url)
+    issues = seo.get("issues", [])
+    classified = [classify_issue(i) for i in issues]
 
-    data = {
-        "speed": sp,
-        "domain": get_domain_info(url),
-        "seo": analyze_html(url),
-        "speed_error": sp_err
+    # Load your template (place the file in your app root as 'template.pptx')
+    prs = Presentation("template.pptx")
+
+    # Flatten speed for placeholders
+    dsk, mob = speed_both.get("desktop") or {}, speed_both.get("mobile") or {}
+
+    replacements = {
+        "{{URL}}": url,
+        "{{Created}}": domain.get("created"),
+        "{{Expiry}}": domain.get("expiry"),
+        "{{DaysToExpire}}": domain.get("days_to_expire"),
+        "{{Registrar}}": domain.get("registrar"),
+
+        "{{PerfDesktop}}": dsk.get("performance_score"),
+        "{{FCPDesktop}}": dsk.get("fcp"),
+        "{{LCPDesktop}}": dsk.get("lcp"),
+        "{{CLSDesktop}}": dsk.get("cls"),
+        "{{INPDesktop}}": dsk.get("inp") or dsk.get("tbt"),
+
+        "{{PerfMobile}}": mob.get("performance_score"),
+        "{{FCPMobile}}": mob.get("fcp"),
+        "{{LCPMobile}}": mob.get("lcp"),
+        "{{CLSMobile}}": mob.get("cls"),
+        "{{INPMobile}}": mob.get("inp") or mob.get("tbt"),
     }
 
-    prs = Presentation()
-    s1 = prs.slides.add_slide(prs.slide_layouts[0])
-    s1.shapes.title.text = "SEO URL Audit Report"
-    s1.placeholders[1].text = url
+    # Replace placeholders in all slides
+    replace_text_everywhere(prs, replacements)
 
-    s2 = prs.slides.add_slide(prs.slide_layouts[1])
-    s2.shapes.title.text = "Core Web Vitals"
-    body = s2.placeholders[1].text_frame
-    if sp:
-        for k,v in [("Performance", sp.get("performance_score")), ("FCP", sp.get("fcp")),
-                    ("LCP", sp.get("lcp")), ("CLS", sp.get("cls")), ("INP/TBT", sp.get("inp") or sp.get("tbt"))]:
-            p = body.add_paragraph(); p.text = f"{k}: {v}"
-    else:
-        p = body.add_paragraph(); p.text = f"Unavailable: {sp_err or 'No PSI data'}"
+    # Insert the On Page Analysis Overview table (find slide by title text)
+    slide = find_slide_by_title(prs, "On Page Analysis Overview")
+    if slide:
+        add_overview_table(slide, classified[:25])  # cap to keep layout tidy
 
-    s3 = prs.slides.add_slide(prs.slide_layouts[1])
-    s3.shapes.title.text = "Domain Details"
-    b3 = s3.placeholders[1].text_frame
-    dm = data.get("domain",{})
-    for k in ["created","expiry","days_to_expire","registrar"]:
-        p = b3.add_paragraph(); p.text = f"{k}: {dm.get(k)}"
-
-    s4 = prs.slides.add_slide(prs.slide_layouts[1])
-    s4.shapes.title.text = "Critical / Important Issues"
-    b4 = s4.placeholders[1].text_frame
-    for i in data.get("seo",{}).get("issues",[])[:10]:
-        p = b4.add_paragraph(); p.text = f"{i['severity'].upper()}: {i['message']}"
-
-    s5 = prs.slides.add_slide(prs.slide_layouts[1])
-    s5.shapes.title.text = "Broken Links (sample)"
-    b5 = s5.placeholders[1].text_frame
-    bad = [l for l in data.get("seo",{}).get("links",[]) if l.get("status",200) >= 400][:10]
-    if not bad:
-        p = b5.add_paragraph(); p.text = "None found"
-    else:
-        for l in bad:
-            p = b5.add_paragraph(); p.text = f"{l['status']} — {l['href']}"
-
-    buf = io.BytesIO(); prs.save(buf); buf.seek(0)
+    # Stream back
+    buf = io.BytesIO()
+    prs.save(buf); buf.seek(0)
     fname = f"SEO_Audit_{domain_from_url(url)}.pptx"
-    return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                     as_attachment=True, download_name=fname)
-
+    return send_file(
+        buf,
+        mimetype="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        as_attachment=True,
+        download_name=fname
+    )
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
