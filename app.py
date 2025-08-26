@@ -14,7 +14,7 @@ from pptx import Presentation
 import os, requests
 import threading
 PSI_SEM = threading.Semaphore(2)
-PSI_CACHE_MAX = 500
+PSI_CACHE_MAX = 50
 # after computing `data`:
 if len(PSI_CACHE) >= PSI_CACHE_MAX:
     oldest_key = min(PSI_CACHE, key=lambda k: PSI_CACHE[k][0])
@@ -380,6 +380,7 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
