@@ -14,7 +14,7 @@ from pptx import Presentation
 import os, requests
 import threading
 
-TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "SEO_Proposal_Living_Shapes.pptx")
+TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "template.pptx")
 app = Flask(__name__)
 # allow all origins (simplest); later you can restrict to your WP domain
 CORS(app, resources={r"/*": {"origins": "*"}})
@@ -535,6 +535,7 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
