@@ -116,61 +116,44 @@ PSI_TTL = 60*60*24   # 24h
 PSI_CACHE_MAX = 50   # limit cache size
 
 def _psi_call(url, strategy, key=None, timeout=18, tries=2):
-    now = time.time()
-    ck = (url, strategy)
-    ts_data = PSI_CACHE.get(ck)
-    if ts_data and now - ts_data[0] < PSI_TTL:
-        return ts_data[1]
-
-    # Normalize URL: PSI requires an absolute URL with scheme
+    # ensure scheme
     if not url.lower().startswith(("http://", "https://")):
         url = "https://" + url
 
+    now = time.time()
+    ck = (url, strategy)
+    cached = PSI_CACHE.get(ck)
+    if cached and now - cached[0] < PSI_TTL:
+        return cached[1]
+
     base = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
 
-    # Keep the first request lean (no INP here to avoid projection issues)
-    lean_fields = (
-        "lighthouseResult("
-        "categories/performance/score,"
-        "audits/first-contentful-paint/numericValue,"
-        "audits/largest-contentful-paint/numericValue,"
-        "audits/cumulative-layout-shift/numericValue,"
-        "audits/total-blocking-time/numericValue"
-        ")"
-    )
-
-    def do_request(use_fields=True):
-        params = {
-            "url": url,
-            "strategy": strategy,
-            "category": "performance",
-        }
-        if use_fields:
-            params["fields"] = lean_fields
+    def do():
+        params = {"url": url, "strategy": strategy}
         if key:
             params["key"] = key
         return requests.get(base, params=params, timeout=timeout)
 
     last_err = None
-    for attempt in range(1, tries + 1):
+    for attempt in range(1, tries+1):
         try:
-            # 1) try with fields
-            r = do_request(use_fields=True)
+            r = do()
+            # Try to parse JSON always
             try:
                 data = r.json()
             except Exception:
                 data = {"error": {"message": f"Non-JSON from PSI (HTTP {r.status_code})"}}
 
-            # If PSI says invalid argument, retry once without fields
-            if "error" in data and "invalid" in data["error"].get("message","").lower():
-                r2 = do_request(use_fields=False)
-                try:
-                    data2 = r2.json()
-                except Exception:
-                    data2 = {"error": {"message": f"Non-JSON from PSI (HTTP {r2.status_code})"}}
-                data = data2
+            # If PSI returned error, include status/code details for visibility
+            if "error" in data:
+                err = data["error"]
+                # Example: {"code":400,"status":"INVALID_ARGUMENT","message":"..."}
+                msg = err.get("message","PSI error")
+                status = err.get("status")
+                code = err.get("code")
+                data["error"]["message"] = f"{msg} (status={status}, code={code})"
 
-            # Cache and return
+            # cache (with eviction)
             if len(PSI_CACHE) >= PSI_CACHE_MAX:
                 oldest = min(PSI_CACHE, key=lambda k: PSI_CACHE[k][0])
                 PSI_CACHE.pop(oldest, None)
@@ -179,7 +162,7 @@ def _psi_call(url, strategy, key=None, timeout=18, tries=2):
 
         except (requests.Timeout, requests.ConnectionError) as e:
             last_err = f"{type(e).__name__}: {e}"
-            time.sleep(0.7 * (2 ** (attempt - 1)))  # backoff
+            time.sleep(0.7 * (2 ** (attempt-1)))  # small backoff
         except Exception as e:
             last_err = f"{type(e).__name__}: {e}"
             break
@@ -187,38 +170,46 @@ def _psi_call(url, strategy, key=None, timeout=18, tries=2):
     return {"error": {"message": f"PSI request failed after {tries} tries: {last_err}"}}
 
 
-
 def _psi_parse(j):
     if not j or "error" in j or not j.get("lighthouseResult"):
+        # return the error string so UI can show it
         return None, (j.get("error", {}) or {}).get("message", "No PSI data")
-    lhr = j["lighthouseResult"]; audits = lhr.get("audits", {}); cats = lhr.get("categories", {})
+
+    lhr = j["lighthouseResult"]
+    audits = lhr.get("audits", {})
+    cats = lhr.get("categories", {})
     perf = cats.get("performance", {}).get("score")
+
     def val(k):
         a = audits.get(k, {}) or {}
         return a.get("numericValue", a.get("displayValue"))
+
     return {
         "performance_score": round((perf or 0) * 100) if perf is not None else None,
         "fcp": val("first-contentful-paint"),
         "lcp": val("largest-contentful-paint"),
         "cls": (audits.get("cumulative-layout-shift", {}) or {}).get("numericValue"),
         "tbt": (audits.get("total-blocking-time", {}) or {}).get("numericValue"),
-        # INP may be missing; only read if present
         "inp": (audits.get("experimental-interaction-to-next-paint", {}) or {}).get("numericValue"),
     }, None
 
 
 
+
 def get_pagespeed_both(url):
-    key = os.getenv("PSI_KEY")  # correct
-    d_raw = _psi_call(url, "desktop", key=key)
+    key = os.getenv("PSI_KEY")  # must be ENV VAR NAME
+    # Desktop first
+    d_raw = _psi_call(url, "desktop", key=key, timeout=18, tries=2)
     desktop, d_err = _psi_parse(d_raw)
-    m_raw = _psi_call(url, "mobile",  key=key)
+    # Mobile next (shorter on purpose)
+    m_raw = _psi_call(url, "mobile",  key=key, timeout=14, tries=1)
     mobile,  m_err = _psi_parse(m_raw)
     return {
         "desktop": desktop, "desktop_error": d_err,
         "mobile":  mobile,  "mobile_error":  m_err,
         "using_key": bool(key)
     }
+
 
 
 # ---------- fast link checker ----------
@@ -436,6 +427,7 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
