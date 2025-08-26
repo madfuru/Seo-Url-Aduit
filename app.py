@@ -14,7 +14,7 @@ from pptx import Presentation
 import os, requests
 import threading
 
-
+TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "SEO_Proposal_Living_Shapes.pptx")
 app = Flask(__name__)
 # allow all origins (simplest); later you can restrict to your WP domain
 CORS(app, resources={r"/*": {"origins": "*"}})
@@ -22,7 +22,6 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 # ---------- helpers ----------
 UA = {"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
-
 
 def fetch(url, timeout=12):
     return requests.get(url, timeout=timeout, headers=UA, allow_redirects=True)
@@ -536,6 +535,7 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
