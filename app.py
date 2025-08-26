@@ -116,63 +116,75 @@ PSI_TTL = 60*60*24   # 24h
 PSI_CACHE_MAX = 50   # limit cache size
 
 def _psi_call(url, strategy, key=None, timeout=18, tries=2):
-    """
-    Call PSI with small response fields, retry on timeouts/5xx.
-    Each try uses `timeout` seconds; total budget ~ tries*timeout plus backoff.
-    """
     now = time.time()
     ck = (url, strategy)
     ts_data = PSI_CACHE.get(ck)
     if ts_data and now - ts_data[0] < PSI_TTL:
         return ts_data[1]
 
+    # Normalize URL: PSI requires an absolute URL with scheme
+    if not url.lower().startswith(("http://", "https://")):
+        url = "https://" + url
+
     base = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
-    # Ask Google to return only what we need (smaller/faster)
-    fields = (
-        "lighthouseResult(categories/performance/score,"
+
+    # Keep the first request lean (no INP here to avoid projection issues)
+    lean_fields = (
+        "lighthouseResult("
+        "categories/performance/score,"
         "audits/first-contentful-paint/numericValue,"
         "audits/largest-contentful-paint/numericValue,"
         "audits/cumulative-layout-shift/numericValue,"
-        "audits/total-blocking-time/numericValue,"
-        "audits/experimental-interaction-to-next-paint/numericValue)"
+        "audits/total-blocking-time/numericValue"
+        ")"
     )
-    params = {
-        "url": url,
-        "strategy": strategy,
-        "category": "performance",
-        "fields": fields,   # Google APIs partial response
-    }
-    if key:
-        params["key"] = key
+
+    def do_request(use_fields=True):
+        params = {
+            "url": url,
+            "strategy": strategy,
+            "category": "performance",
+        }
+        if use_fields:
+            params["fields"] = lean_fields
+        if key:
+            params["key"] = key
+        return requests.get(base, params=params, timeout=timeout)
 
     last_err = None
-    for attempt in range(1, tries+1):
+    for attempt in range(1, tries + 1):
         try:
-            r = requests.get(base, params=params, timeout=timeout)
-            # If non-JSON (rare), synthesize an error
+            # 1) try with fields
+            r = do_request(use_fields=True)
             try:
                 data = r.json()
             except Exception:
                 data = {"error": {"message": f"Non-JSON from PSI (HTTP {r.status_code})"}}
+
+            # If PSI says invalid argument, retry once without fields
+            if "error" in data and "invalid" in data["error"].get("message","").lower():
+                r2 = do_request(use_fields=False)
+                try:
+                    data2 = r2.json()
+                except Exception:
+                    data2 = {"error": {"message": f"Non-JSON from PSI (HTTP {r2.status_code})"}}
+                data = data2
+
             # Cache and return
-            # Evict oldest if needed
             if len(PSI_CACHE) >= PSI_CACHE_MAX:
                 oldest = min(PSI_CACHE, key=lambda k: PSI_CACHE[k][0])
                 PSI_CACHE.pop(oldest, None)
             PSI_CACHE[ck] = (time.time(), data)
             return data
+
         except (requests.Timeout, requests.ConnectionError) as e:
             last_err = f"{type(e).__name__}: {e}"
-            # simple exponential backoff: 0.6s, 1.2s, ...
-            backoff = 0.6 * (2 ** (attempt-1))
-            time.sleep(backoff)
+            time.sleep(0.7 * (2 ** (attempt - 1)))  # backoff
         except Exception as e:
             last_err = f"{type(e).__name__}: {e}"
             break
 
-    # If we got here, all tries failed
     return {"error": {"message": f"PSI request failed after {tries} tries: {last_err}"}}
-
 
 
 
@@ -185,13 +197,15 @@ def _psi_parse(j):
         a = audits.get(k, {}) or {}
         return a.get("numericValue", a.get("displayValue"))
     return {
-        "performance_score": round((perf or 0)*100) if perf is not None else None,
+        "performance_score": round((perf or 0) * 100) if perf is not None else None,
         "fcp": val("first-contentful-paint"),
         "lcp": val("largest-contentful-paint"),
         "cls": (audits.get("cumulative-layout-shift", {}) or {}).get("numericValue"),
         "tbt": (audits.get("total-blocking-time", {}) or {}).get("numericValue"),
+        # INP may be missing; only read if present
         "inp": (audits.get("experimental-interaction-to-next-paint", {}) or {}).get("numericValue"),
     }, None
+
 
 
 def get_pagespeed_both(url):
@@ -422,6 +436,7 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
