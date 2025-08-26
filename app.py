@@ -33,7 +33,7 @@ def domain_from_url(u):
 
 TEMPLATE_PATH = os.getenv(
     "PPTX_TEMPLATE",
-    os.path.join(os.path.dirname(__file__), "SEO_Proposal_Living_Shapes.pptx")
+    os.path.join(os.path.dirname(__file__), "template.pptx")
 )
 
 def _load_template():
@@ -543,6 +543,7 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
