@@ -14,7 +14,6 @@ from pptx import Presentation
 import os, requests
 import threading
 
-TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "template.pptx")
 app = Flask(__name__)
 # allow all origins (simplest); later you can restrict to your WP domain
 CORS(app, resources={r"/*": {"origins": "*"}})
@@ -32,7 +31,18 @@ def safe_text(el):
 def domain_from_url(u):
     return urlparse(u).netloc.lower()
 
+TEMPLATE_PATH = os.getenv(
+    "PPTX_TEMPLATE",
+    os.path.join(os.path.dirname(__file__), "SEO_Proposal_Living_Shapes.pptx")
+)
 
+def _load_template():
+    if not os.path.exists(TEMPLATE_PATH):
+        raise FileNotFoundError(f"Template not found at {TEMPLATE_PATH}")
+    try:
+        return Presentation(TEMPLATE_PATH)
+    except Exception as e:
+        raise RuntimeError(f"Failed to load PPTX template: {e}")
 # --- RDAP with quick universal endpoint first ---
 def _rdap_events_to_dates(j):
     created = expires = None
@@ -478,7 +488,7 @@ def favicon():
 @app.route("/report")
 def report():
     url = request.args.get("url","").strip()
-    prs = Presentation(TEMPLATE_PATH)
+    prs = _load_template()
     if not url:
         return "missing url", 400
 
@@ -533,6 +543,7 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
