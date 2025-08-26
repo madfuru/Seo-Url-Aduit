@@ -115,7 +115,7 @@ PSI_CACHE = {}
 PSI_TTL = 60*60*24   # 24h
 PSI_CACHE_MAX = 50   # limit cache size
 
-def _psi_call(url, strategy, key=None, timeout=120, tries=2):
+def _psi_call(url, strategy, key=None, timeout=60, tries=2):
     # ensure scheme
     if not url.lower().startswith(("http://", "https://")):
         url = "https://" + url
@@ -199,10 +199,10 @@ def _psi_parse(j):
 def get_pagespeed_both(url):
     key = os.getenv("PSI_KEY")  # must be ENV VAR NAME
     # Desktop first
-    d_raw = _psi_call(url, "desktop", key=key, timeout=120, tries=2)
+    d_raw = _psi_call(url, "desktop", key=key, timeout=60, tries=2)
     desktop, d_err = _psi_parse(d_raw)
     # Mobile next (shorter on purpose)
-    m_raw = _psi_call(url, "mobile",  key=key, timeout=120, tries=1)
+    m_raw = _psi_call(url, "mobile",  key=key, timeout=60, tries=1)
     mobile,  m_err = _psi_parse(m_raw)
     return {
         "desktop": desktop, "desktop_error": d_err,
@@ -427,6 +427,7 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
