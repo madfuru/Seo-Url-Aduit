@@ -1,0 +1,139 @@
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from pptx.dml.color import RGBColor
+import io
+
+# --- helper: robust text replacement across runs ---
+def replace_text_everywhere(prs: Presentation, replacements: dict):
+    for slide in prs.slides:
+        for shp in slide.shapes:
+            if not hasattr(shp, "has_text_frame") or not shp.has_text_frame:
+                continue
+            tf = shp.text_frame
+            for p in tf.paragraphs:
+                for run in p.runs:
+                    txt = run.text
+                    for k, v in replacements.items():
+                        if k in txt:
+                            run.text = txt.replace(k, v or "-")
+                            txt = run.text  # for chained replacements
+
+# --- helper: find a slide by (partial) title text ---
+def find_slide_by_title(prs: Presentation, needle: str):
+    needle = needle.lower()
+    for slide in prs.slides:
+        title = getattr(slide.shapes.title, "text", "") if slide.shapes.title else ""
+        if needle in title.lower():
+            return slide
+    return None
+
+# --- helper: make a 3-col table for overview ---
+def add_overview_table(slide, rows_data):
+    """rows_data = [{'issue_name':..., 'issue_type':..., 'priority':...}, ...]"""
+    # layout: width across most of slide
+    left = Inches(0.5)
+    top = Inches(2.0)     # adjust if you want higher/lower
+    width = Inches(9.0)
+    # header + data rows
+    rows = max(1, len(rows_data)) + 1
+    cols = 3
+
+    table_shape = slide.shapes.add_table(rows, cols, left, top, width, Inches(0.2 + 0.4*rows))
+    table = table_shape.table
+
+    # headers
+    hdrs = ["Issue Name", "Issue Type", "Issue Priority"]
+    for j, h in enumerate(hdrs):
+        cell = table.cell(0, j)
+        cell.text = h
+        # simple styling (bold)
+        for p in cell.text_frame.paragraphs:
+            for r in p.runs:
+                r.font.bold = True
+
+    # body
+    for i, row in enumerate(rows_data, start=1):
+        table.cell(i, 0).text = row.get("issue_name") or "-"
+        table.cell(i, 1).text = row.get("issue_type") or "-"
+        table.cell(i, 2).text = row.get("priority") or "-"
+
+def classify_issue(raw):
+    msg = (raw.get("message") or "").lower()
+    # defaults
+    name, itype, prio = raw.get("message",""), "Issue", "Medium"
+
+    if "missing h1" in msg:            name, itype, prio = "H1: Missing", "Issue", "Medium"
+    elif "multiple h1" in msg:         name, itype, prio = "H1: Multiple", "Warning", "Medium"
+    elif "missing <title>" in msg:     name, itype, prio = "Page Titles: Missing", "Issue", "High"
+    elif "title length > 60" in msg or "over 60" in msg:
+        name, itype, prio = "Page Titles: Over 60 Characters", "Opportunity", "Medium"
+    elif "below 30" in msg:
+        name, itype, prio = "Page Titles: Below 30 Characters", "Opportunity", "Medium"
+    elif "missing meta description" in msg:
+        name, itype, prio = "Meta Descriptions: Missing", "Warning", "High"
+    elif "meta description > 160" in msg or "over 160" in msg:
+        name, itype, prio = "Meta Descriptions: Over 160 Characters", "Opportunity", "Medium"
+    elif "missing canonical" in msg:
+        name, itype, prio = "Canonicals: Missing", "Issue", "High"
+    elif "canonical url not returning" in msg or "canonical url not reachable" in msg:
+        name, itype, prio = "Canonicals: Canonicalised", "Warning", "High"
+    elif "non-indexable canonical" in msg:
+        name, itype, prio = "Canonicals: Non-Indexable Canonical", "Issue", "High"
+    elif "noindex" in msg:
+        name, itype, prio = "Indexability: noindex Present", "Issue", "High"
+    elif "without alt" in msg:
+        name, itype, prio = "Images: Missing ALT", "Issue", "Medium"
+    elif "large image" in msg or ">150kb" in msg or "over 100 kb" in msg:
+        name, itype, prio = "Images: Over 100 KB", "Opportunity", "Medium"
+    elif "http status" in msg:
+        name, itype, prio = "Response Codes: Error", "Issue", "High"
+    elif "robots.txt" in msg:
+        name, itype, prio = "Response Codes: Blocked by robots.txt", "Warning", "High"
+
+    return {"issue_name": name, "issue_type": itype, "priority": prio}
+
+def build_report_from_template(template_path: str, data: dict, url: str) -> io.BytesIO:
+    prs = Presentation(template_path)
+
+    # Flatten speed into desktop/mobile for placeholders
+    sp = data.get("speed") or {}
+    dsk = sp.get("desktop") or {}
+    mob = sp.get("mobile") or {}
+    dom = data.get("domain") or {}
+    issues = (data.get("seo") or {}).get("issues") or []
+
+    replacements = {
+        "{{URL}}": url,
+        "{{Created}}": str(dom.get("created") or "-"),
+        "{{Expiry}}": str(dom.get("expiry") or "-"),
+        "{{DaysToExpire}}": str(dom.get("days_to_expire") or "-"),
+        "{{Registrar}}": str(dom.get("registrar") or "-"),
+
+        "{{PerfDesktop}}": str(dsk.get("performance_score") or "-"),
+        "{{FCPDesktop}}": str(dsk.get("fcp") or "-"),
+        "{{LCPDesktop}}": str(dsk.get("lcp") or "-"),
+        "{{CLSDesktop}}": str(dsk.get("cls") or "-"),
+        "{{INPDesktop}}": str(dsk.get("inp") or dsk.get("tbt") or "-"),
+
+        "{{PerfMobile}}": str(mob.get("performance_score") or "-"),
+        "{{FCPMobile}}": str(mob.get("fcp") or "-"),
+        "{{LCPMobile}}": str(mob.get("lcp") or "-"),
+        "{{CLSMobile}}": str(mob.get("cls") or "-"),
+        "{{INPMobile}}": str(mob.get("inp") or mob.get("tbt") or "-"),
+    }
+
+    # 1) do simple text replacements everywhere
+    replace_text_everywhere(prs, replacements)
+
+    # 2) drop the On-Page Overview table
+    overview_slide = find_slide_by_title(prs, "On Page Analysis Overview")
+    if overview_slide:
+        rows_classified = [classify_issue(i) for i in issues]
+        # If you also want to show strategic, non-detected rows (like “Schema missing”), append here
+        add_overview_table(overview_slide, rows_classified[:25])  # cap rows to keep design tidy
+
+    # Stream out
+    buf = io.BytesIO()
+    prs.save(buf)
+    buf.seek(0)
+    return buf
