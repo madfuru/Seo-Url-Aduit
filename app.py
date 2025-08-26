@@ -101,6 +101,53 @@ def get_domain_info(u):
 
     return {"created": None, "expiry": None, "days_to_expire": None, "registrar": None}
 
+def classify_issue(raw):
+    msg = raw.get("message","").lower()
+    sev = (raw.get("severity") or "").lower()
+
+    # Default
+    name, itype, prio = raw.get("message",""), "Issue", "Medium"
+
+    # H1 issues
+    if "missing h1" in msg:
+        name, itype, prio = "H1: Missing", "Issue", "Medium"
+    elif "multiple h1" in msg:
+        name, itype, prio = "H1: Multiple", "Warning", "Medium"
+
+    # Images
+    elif "without alt" in msg:
+        name, itype, prio = "Images: Missing ALT", "Issue", "Medium"
+    elif "large image" in msg:
+        name, itype, prio = "Images: Over 100 KB", "Opportunity", "Medium"
+
+    # Canonical
+    elif "missing canonical" in msg:
+        name, itype, prio = "Canonicals: Missing", "Issue", "High"
+    elif "canonical url not returning" in msg or "not reachable" in msg:
+        name, itype, prio = "Canonicals: Canonicalised", "Warning", "High"
+
+    # Titles / Descriptions
+    elif "missing <title>" in msg:
+        name, itype, prio = "Page Titles: Missing", "Issue", "High"
+    elif "title length > 60" in msg:
+        name, itype, prio = "Page Titles: Over 60 Characters", "Opportunity", "Medium"
+    elif "meta description > 160" in msg:
+        name, itype, prio = "Meta Descriptions: Over 160 Characters", "Opportunity", "Medium"
+    elif "missing meta description" in msg:
+        name, itype, prio = "Meta Descriptions: Missing", "Warning", "High"
+
+    # Robots/noindex
+    elif "noindex" in msg:
+        name, itype, prio = "Response Codes: Noindex Tag", "Issue", "High"
+
+    # HTTP errors
+    elif "http status" in msg:
+        name, itype, prio = "Response Codes: Error", "Issue", "High"
+
+    return {"issue_name": name, "issue_type": itype, "priority": prio}
+
+
+
 # ---------- PSI ----------
 PSI_SEM = threading.Semaphore(2)  # limit concurrent /psi calls per worker
 PSI_CACHE = {}                    # (url, strategy) -> (timestamp, json)
@@ -223,6 +270,63 @@ def _fast_status(u):
         return {"href": u, "status": code}
     except Exception:
         return {"href": u, "status": 0}
+def classify_issue(raw):
+    """Map raw analyzer messages to: Issue Name / Issue Type / Priority."""
+    msg = (raw.get("message") or "").lower()
+
+    # defaults
+    name, itype, prio = raw.get("message",""), "Issue", "Medium"
+
+    # H1
+    if "missing h1" in msg:
+        return {"issue_name": "H1: Missing", "issue_type": "Issue", "priority": "Medium"}
+    if "multiple h1" in msg:
+        return {"issue_name": "H1: Multiple", "issue_type": "Warning", "priority": "Medium"}
+
+    # Titles
+    if "missing <title>" in msg:
+        return {"issue_name": "Page Titles: Missing", "issue_type": "Issue", "priority": "High"}
+    if "title length > 60" in msg or "over 60 characters" in msg:
+        return {"issue_name": "Page Titles: Over 60 Characters", "issue_type": "Opportunity", "priority": "Medium"}
+    if "below 30" in msg:
+        return {"issue_name": "Page Titles: Below 30 Characters", "issue_type": "Opportunity", "priority": "Medium"}
+
+    # Meta descriptions
+    if "missing meta description" in msg:
+        return {"issue_name": "Meta Descriptions: Missing", "issue_type": "Warning", "priority": "High"}
+    if "meta description > 160" in msg or "over 160" in msg:
+        return {"issue_name": "Meta Descriptions: Over 160 Characters", "issue_type": "Opportunity", "priority": "Medium"}
+
+    # Canonical
+    if "missing canonical" in msg:
+        return {"issue_name": "Canonicals: Missing", "issue_type": "Issue", "priority": "High"}
+    if "canonical url not returning" in msg or "canonical url not reachable" in msg:
+        return {"issue_name": "Canonicals: Canonicalised", "issue_type": "Warning", "priority": "High"}
+    if "non-indexable canonical" in msg:
+        return {"issue_name": "Canonicals: Non-Indexable Canonical", "issue_type": "Issue", "priority": "High"}
+
+    # Robots / noindex
+    if "noindex" in msg:
+        return {"issue_name": "Indexability: noindex Present", "issue_type": "Issue", "priority": "High"}
+
+    # Images
+    if "image(s) without alt" in msg:
+        return {"issue_name": "Images: Missing ALT", "issue_type": "Issue", "priority": "Medium"}
+    if "large image" in msg or " >150kb" in msg or "over 100 kb" in msg:
+        return {"issue_name": "Images: Over 100 KB", "issue_type": "Opportunity", "priority": "Medium"}
+
+    # HTTP / response
+    if "http status" in msg:
+        # you already add exact status text; treat 4xx/5xx as High
+        return {"issue_name": "Response Codes: Error", "issue_type": "Issue", "priority": "High"}
+
+    # Canonical / robots fallback
+    if "robots.txt" in msg:
+        return {"issue_name": "Response Codes: Blocked by robots.txt", "issue_type": "Warning", "priority": "High"}
+
+    # Fallback
+    return {"issue_name": raw.get("message","").strip() or "Unknown", "issue_type": "Issue", "priority": "Medium"}
+
 
 # ---------- analyzer ----------
 def analyze_html(url):
@@ -329,7 +433,7 @@ def analyze():
 
     skip_psi = request.args.get("skip_psi", "0") == "1"
 
-    results = {"speed": {}, "domain": {}, "seo": {"issues":[]}, "links": []}
+    results = {"speed": {}, "domain": {}, "seo": {"issues": [], "classified": []}, "links": []}
 
     def _speed():  return ("speed", get_pagespeed_both(url))
     def _domain(): return ("domain", get_domain_info(url))
@@ -337,27 +441,34 @@ def analyze():
         x = analyze_html(url)
         return ("seo_links", x)
 
+    # run in parallel, but optionally skip PSI for a fast response
     with ThreadPoolExecutor(max_workers=3) as ex:
         futs = []
         if not skip_psi:
             futs.append(ex.submit(_speed))
         futs += [ex.submit(_domain), ex.submit(_seo)]
 
-        done, not_done = wait(futs, timeout=14)  # shorter so UI is snappy
-        for f in not_done: f.cancel()
+        done, not_done = wait(futs, timeout=14)  # keep fast for UI
+        for f in not_done:
+            f.cancel()
 
         for f in done:
             try:
                 k, v = f.result()
                 if k == "seo_links":
-                    results["seo"]   = {"issues": v.get("issues", [])}
+                    issues = v.get("issues", [])
+                    results["seo"] = {
+                        "issues": issues,
+                        "classified": [classify_issue(i) for i in issues]
+                    }
                     results["links"] = v.get("links", [])
                 else:
                     results[k] = v
             except Exception as e:
-                app.logger.warning(f"worker failed: {e}")
+                app.logger.warning(f"worker {k if 'k' in locals() else '?'} failed: {e}")
 
     return jsonify(results), 200
+
 
 @app.route("/favicon.ico")
 def favicon():
@@ -427,6 +538,7 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
