@@ -478,6 +478,7 @@ def favicon():
 @app.route("/report")
 def report():
     url = request.args.get("url","").strip()
+    prs = Presentation(TEMPLATE_PATH)
     if not url:
         return "missing url", 400
 
@@ -487,9 +488,6 @@ def report():
     seo = analyze_html(url)
     issues = seo.get("issues", [])
     classified = [classify_issue(i) for i in issues]
-
-    # Load your template (place the file in your app root as 'template.pptx')
-    prs = Presentation("template.pptx")
 
     # Flatten speed for placeholders
     dsk, mob = speed_both.get("desktop") or {}, speed_both.get("mobile") or {}
@@ -535,6 +533,7 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
