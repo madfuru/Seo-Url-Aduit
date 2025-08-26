@@ -13,13 +13,7 @@ from bs4 import BeautifulSoup
 from pptx import Presentation
 import os, requests
 import threading
-PSI_SEM = threading.Semaphore(2)
-PSI_CACHE_MAX = 50
-# after computing `data`:
-if len(PSI_CACHE) >= PSI_CACHE_MAX:
-    oldest_key = min(PSI_CACHE, key=lambda k: PSI_CACHE[k][0])
-    PSI_CACHE.pop(oldest_key, None)
-PSI_CACHE[ck] = (now, data)
+
 
 app = Flask(__name__)
 # allow all origins (simplest); later you can restrict to your WP domain
@@ -108,17 +102,26 @@ def get_domain_info(u):
     return {"created": None, "expiry": None, "days_to_expire": None, "registrar": None}
 
 # ---------- PSI ----------
-PSI_CACHE = {}
-PSI_TTL = 60*60*24
+PSI_SEM = threading.Semaphore(2)  # limit concurrent /psi calls per worker
+PSI_CACHE = {}                    # (url, strategy) -> (timestamp, json)
+PSI_TTL = 60*60*24                # 24h
+PSI_CACHE_MAX = 50  
+if len(PSI_CACHE) >= PSI_CACHE_MAX:
+    oldest_key = min(PSI_CACHE, key=lambda k: PSI_CACHE[k][0])
+    PSI_CACHE.pop(oldest_key, None)
+PSI_CACHE[ck] = (now, data)
 def _psi_call(url, strategy, key=None, timeout=22):
     now = time.time()
     ck = (url, strategy)
-    if ck in PSI_CACHE and now - PSI_CACHE[ck][0] < PSI_TTL:
-        return PSI_CACHE[ck][1]
+
+    # Serve fresh cache
+    ts_data = PSI_CACHE.get(ck)
+    if ts_data and now - ts_data[0] < PSI_TTL:
+        return ts_data[1]
 
     base = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
     params = {"url": url, "strategy": strategy}
-    if key:                      # <-- pass your key when set
+    if key:
         params["key"] = key
 
     try:
@@ -130,8 +133,14 @@ def _psi_call(url, strategy, key=None, timeout=22):
     except Exception as e:
         data = {"error": {"message": f"PSI request failed: {e}"}}
 
+    # Evict oldest if cache too big
+    if len(PSI_CACHE) >= PSI_CACHE_MAX:
+        oldest = min(PSI_CACHE, key=lambda k: PSI_CACHE[k][0])
+        PSI_CACHE.pop(oldest, None)
+
     PSI_CACHE[ck] = (now, data)
     return data
+
 
 
 def _psi_parse(j):
@@ -380,6 +389,7 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
