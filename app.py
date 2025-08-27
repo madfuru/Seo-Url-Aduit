@@ -11,6 +11,7 @@ from flask import Response
 from werkzeug.exceptions import HTTPException
 from bs4 import BeautifulSoup
 from pptx import Presentation
+from pptx import Presentation
 import os, requests
 import threading
 
@@ -30,16 +31,10 @@ def safe_text(el):
 
 def domain_from_url(u):
     return urlparse(u).netloc.lower()
-
-TEMPLATE_PATH = os.getenv(
-    "PPTX_TEMPLATE",
-    os.path.join(os.path.dirname(__file__), "template.pptx")
-)
 TEMPLATE_PATH = os.getenv(
     "PPTX_TEMPLATE",
     os.path.join(os.path.dirname(__file__), "template.pptx")  # Use the correct filename here
 )
-
 
 def _load_template():
     if not os.path.exists(TEMPLATE_PATH):
@@ -170,12 +165,6 @@ PSI_CACHE_MAX = 50
 
 # at top of file (once)
 from math import ceil
-
-# ---------- PSI ----------
-PSI_CACHE = {}
-PSI_TTL = 60*60*24   # 24h
-PSI_CACHE_MAX = 50   # limit cache size
-
 def _psi_call(url, strategy, key=None, timeout=60, tries=2):
     # ensure scheme
     if not url.lower().startswith(("http://", "https://")):
@@ -497,7 +486,7 @@ def debug_template():
 @app.route("/report")
 def report():
     url = request.args.get("url","").strip()
-    prs = _load_template()
+    prs = Presentation("/path/to/template.pptx")  # local path
     if not url:
         return "missing url", 400
 
@@ -552,41 +541,3 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
