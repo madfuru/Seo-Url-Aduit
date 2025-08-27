@@ -486,7 +486,8 @@ def debug_template():
 @app.route("/report")
 def report():
     url = request.args.get("url","").strip()
-    prs = Presentation("/path/to/templates.pptx")  # local path
+    with open(TEMPLATE_PATH, "rb") as f:
+    prs = Presentation(f)
     if not url:
         return "missing url", 400
 
@@ -541,4 +542,5 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
