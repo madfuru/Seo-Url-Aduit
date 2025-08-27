@@ -33,7 +33,7 @@ def domain_from_url(u):
     return urlparse(u).netloc.lower()
 TEMPLATE_PATH = os.getenv(
     "PPTX_TEMPLATE",
-    os.path.join(os.path.dirname(__file__), "template.pptx")  # Use the correct filename here
+    os.path.join(os.path.dirname(__file__), "templates.pptx")  # Use the correct filename here
 )
 
 def _load_template():
@@ -486,7 +486,7 @@ def debug_template():
 @app.route("/report")
 def report():
     url = request.args.get("url","").strip()
-    prs = Presentation("/path/to/template.pptx")  # local path
+    prs = Presentation("/path/to/templates.pptx")  # local path
     if not url:
         return "missing url", 400
 
@@ -541,3 +541,4 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
