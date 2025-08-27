@@ -35,6 +35,11 @@ TEMPLATE_PATH = os.getenv(
     "PPTX_TEMPLATE",
     os.path.join(os.path.dirname(__file__), "template.pptx")
 )
+TEMPLATE_PATH = os.getenv(
+    "PPTX_TEMPLATE",
+    os.path.join(os.path.dirname(__file__), "template.pptx")  # Use the correct filename here
+)
+
 
 def _load_template():
     if not os.path.exists(TEMPLATE_PATH):
@@ -483,7 +488,11 @@ def analyze():
 def favicon():
     return Response(status=204)
 
-
+@app.route("/debug/template")
+def debug_template():
+    import os
+    exists = os.path.exists(TEMPLATE_PATH)
+    return jsonify({"template_path": TEMPLATE_PATH, "exists": exists})
 
 @app.route("/report")
 def report():
@@ -543,6 +552,7 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
