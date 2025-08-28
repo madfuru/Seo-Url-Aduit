@@ -5,4 +5,5 @@ services:
     name: seo-url-audit
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app
+    startCommand: gunicorn app:app --timeout 120
+
