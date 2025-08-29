@@ -36,6 +36,7 @@ TEMPLATE_PATH = os.getenv(
     os.path.join(os.path.dirname(__file__), "templates.pptx")  # Use the correct filename here
 )
 
+
 def _load_template():
     if not os.path.exists(TEMPLATE_PATH):
         raise FileNotFoundError(f"Template not found at {TEMPLATE_PATH}")
@@ -543,6 +544,7 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
