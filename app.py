@@ -33,7 +33,7 @@ def domain_from_url(u):
     return urlparse(u).netloc.lower()
 TEMPLATE_PATH = os.getenv(
     "PPTX_TEMPLATE",
-    os.path.join(os.path.dirname(__file__), "templates.pptx")  # Use the correct filename here
+    os.path.join(os.path.dirname(__file__), "template.pptx")  # Use the correct filename here
 )
 
 
@@ -330,6 +330,14 @@ def classify_issue(raw):
 
     # Fallback
     return {"issue_name": raw.get("message","").strip() or "Unknown", "issue_type": "Issue", "priority": "Medium"}
+  
+import zipfile, os
+
+if not os.path.exists(TEMPLATE_PATH):
+    raise FileNotFoundError(f"{TEMPLATE_PATH} not found")
+
+if not zipfile.is_zipfile(TEMPLATE_PATH):
+    raise RuntimeError(f"{TEMPLATE_PATH} is not a valid PPTX (zip) file")
 
 
 # ---------- analyzer ----------
@@ -544,6 +552,7 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
