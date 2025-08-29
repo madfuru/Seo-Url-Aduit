@@ -1,11 +1,9 @@
 services:
-envVars:
-  - key: PPTX_TEMPLATE
-    value: /opt/render/project/src/templates.pptx
-    templates.pptx: Microsoft PowerPoint 2007+
   - type: web
     name: seo-url-audit
     runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app --timeout 120
-
+    envVars:
+      - key: PPTX_TEMPLATE
+        value: /opt/render/project/src/templates.pptx
