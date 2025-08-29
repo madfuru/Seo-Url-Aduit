@@ -1,4 +1,5 @@
 services:
+envVars:
   - key: PPTX_TEMPLATE
     value: /opt/render/project/src/templates.pptx
     templates.pptx: Microsoft PowerPoint 2007+
