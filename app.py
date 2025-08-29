@@ -488,6 +488,7 @@ def report():
     url = request.args.get("url","").strip()
     with open(TEMPLATE_PATH, "rb") as f:
       prs = Presentation(f)
+      print(len(prs.slides))
     if not url:
         return "missing url", 400
 
@@ -542,6 +543,7 @@ def report():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
