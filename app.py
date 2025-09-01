@@ -492,17 +492,68 @@ def debug_template():
     exists = os.path.exists(TEMPLATE_PATH)
     return jsonify({"template_path": TEMPLATE_PATH, "exists": exists})
 
+
+def replace_text_everywhere(prs, replacements):
+    """Replace placeholders in all slides."""
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if not shape.has_text_frame:
+                continue
+            for paragraph in shape.text_frame.paragraphs:
+                for run in paragraph.runs:
+                    for key, val in replacements.items():
+                        if key in run.text:
+                            run.text = run.text.replace(key, str(val))
+
+def find_slide_by_title(prs, title_text):
+    """Find a slide by its title text."""
+    for slide in prs.slides:
+        if slide.shapes.title and slide.shapes.title.text == title_text:
+            return slide
+    return None
+
+def add_overview_table(slide, rows_data):
+    """Insert a table for classified issues into the slide."""
+    if not rows_data:
+        return
+
+    rows = len(rows_data) + 1  # header row
+    cols = 3
+    left = Inches(0.5)
+    top = Inches(1.5)
+    width = Inches(9)
+    height = Inches(0.3 + 0.3 * rows)
+
+    table = slide.shapes.add_table(rows, cols, left, top, width, height).table
+
+    # Set header
+    table.cell(0,0).text = "Issue Name"
+    table.cell(0,1).text = "Issue Type"
+    table.cell(0,2).text = "Priority"
+
+    # Fill rows
+    for i, item in enumerate(rows_data):
+        table.cell(i+1,0).text = item.get("issue_name","-")
+        table.cell(i+1,1).text = item.get("issue_type","-")
+        table.cell(i+1,2).text = item.get("priority","-")
+
+# ------------------ /report endpoint ------------------
+
 @app.route("/report")
 def report():
     url = request.args.get("url","").strip()
-    with open(TEMPLATE_PATH, "rb") as f:
-      prs = Presentation(f)
-      print(len(prs.slides))
     if not url:
         return "missing url", 400
 
+    # Load template
+    try:
+        with open(TEMPLATE_PATH, "rb") as f:
+            prs = Presentation(f)
+    except Exception as e:
+        return jsonify({"detail": f"Failed to load PPTX template: {e}", "error":"server_error"}), 500
+
     # Gather data
-    speed_both = get_pagespeed_both(url)  # {desktop, desktop_error, mobile, mobile_error}
+    speed_both = get_pagespeed_both(url)
     domain = get_domain_info(url)
     seo = analyze_html(url)
     issues = seo.get("issues", [])
@@ -511,6 +562,7 @@ def report():
     # Flatten speed for placeholders
     dsk, mob = speed_both.get("desktop") or {}, speed_both.get("mobile") or {}
 
+    # Placeholder replacements
     replacements = {
         "{{URL}}": url,
         "{{Created}}": domain.get("created"),
@@ -531,18 +583,20 @@ def report():
         "{{INPMobile}}": mob.get("inp") or mob.get("tbt"),
     }
 
-    # Replace placeholders in all slides
+    # Replace placeholders
     replace_text_everywhere(prs, replacements)
 
-    # Insert the On Page Analysis Overview table (find slide by title text)
+    # Add On Page Analysis Overview table
     slide = find_slide_by_title(prs, "On Page Analysis Overview")
     if slide:
-        add_overview_table(slide, classified[:25])  # cap to keep layout tidy
+        add_overview_table(slide, classified[:25])  # limit 25 for layout
 
-    # Stream back
+    # Stream back PPTX
     buf = io.BytesIO()
-    prs.save(buf); buf.seek(0)
+    prs.save(buf)
+    buf.seek(0)
     fname = f"SEO_Audit_{domain_from_url(url)}.pptx"
+
     return send_file(
         buf,
         mimetype="application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -550,48 +604,9 @@ def report():
         download_name=fname
     )
 
-
-def replace_text_everywhere(prs, replacements):
-    for slide in prs.slides:
-        for shape in slide.shapes:
-            if not shape.has_text_frame:
-                continue
-            for paragraph in shape.text_frame.paragraphs:
-                for run in paragraph.runs:
-                    for key, val in replacements.items():
-                        if key in run.text:
-                            run.text = run.text.replace(key, str(val))
-
-
-def find_slide_by_title(prs, title_text):
-    for slide in prs.slides:
-        if slide.shapes.title and slide.shapes.title.text == title_text:
-            return slide
-    return None
-def add_overview_table(slide, rows_data):
-    # Insert table at fixed position
-    rows = len(rows_data) + 1  # +1 for header
-    cols = 3
-    left = Inches(0.5)
-    top = Inches(1.5)
-    width = Inches(9)
-    height = Inches(0.8 + 0.3 * rows)
-
-    table = slide.shapes.add_table(rows, cols, left, top, width, height).table
-
-    # Header
-    table.cell(0,0).text = "Issue Name"
-    table.cell(0,1).text = "Issue Type"
-    table.cell(0,2).text = "Priority"
-
-    # Fill rows
-    for i, item in enumerate(rows_data):
-        table.cell(i+1,0).text = item.get("issue_name","-")
-        table.cell(i+1,1).text = item.get("issue_type","-")
-        table.cell(i+1,2).text = item.get("priority","-")
-
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
