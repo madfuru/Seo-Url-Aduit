@@ -33,7 +33,7 @@ def domain_from_url(u):
     return urlparse(u).netloc.lower()
 TEMPLATE_PATH = os.getenv(
     "PPTX_TEMPLATE",
-    os.path.join(os.path.dirname(__file__), "template.pptx")  # Use the correct filename here
+    os.path.join(os.path.dirname(__file__), "templates.pptx")  # Use the correct filename here
 )
 
 
@@ -592,6 +592,7 @@ def add_overview_table(slide, rows_data):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
