@@ -1,5 +1,6 @@
 import io, re, os, datetime as dt
 import re as _re
+from pptx.util import Inches
 import time
 import json
 from urllib.parse import urlparse
@@ -10,7 +11,6 @@ from flask_cors import CORS
 from flask import Response
 from werkzeug.exceptions import HTTPException
 from bs4 import BeautifulSoup
-from pptx import Presentation
 from pptx import Presentation
 import os, requests
 import threading
@@ -550,8 +550,49 @@ def report():
         download_name=fname
     )
 
+
+def replace_text_everywhere(prs, replacements):
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if not shape.has_text_frame:
+                continue
+            for paragraph in shape.text_frame.paragraphs:
+                for run in paragraph.runs:
+                    for key, val in replacements.items():
+                        if key in run.text:
+                            run.text = run.text.replace(key, str(val))
+
+
+def find_slide_by_title(prs, title_text):
+    for slide in prs.slides:
+        if slide.shapes.title and slide.shapes.title.text == title_text:
+            return slide
+    return None
+def add_overview_table(slide, rows_data):
+    # Insert table at fixed position
+    rows = len(rows_data) + 1  # +1 for header
+    cols = 3
+    left = Inches(0.5)
+    top = Inches(1.5)
+    width = Inches(9)
+    height = Inches(0.8 + 0.3 * rows)
+
+    table = slide.shapes.add_table(rows, cols, left, top, width, height).table
+
+    # Header
+    table.cell(0,0).text = "Issue Name"
+    table.cell(0,1).text = "Issue Type"
+    table.cell(0,2).text = "Priority"
+
+    # Fill rows
+    for i, item in enumerate(rows_data):
+        table.cell(i+1,0).text = item.get("issue_name","-")
+        table.cell(i+1,1).text = item.get("issue_type","-")
+        table.cell(i+1,2).text = item.get("priority","-")
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
